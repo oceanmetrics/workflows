@@ -50,9 +50,9 @@ open_dataset(nc_pq) |>
   mapView(layer.name = "A counties")
 ```
 
-## Push parquet to AWS S3 Bucket
+## Setup S3 AWS Bucket
 
-- [README](https://cran.r-project.org/web/packages/aws.s3/readme/README.html)
+- [aws.s3: README](https://cran.r-project.org/web/packages/aws.s3/readme/README.html)
 - [Using Amazon S3 with R – Notes from a data witch](https://blog.djnavarro.net/posts/2022-03-17_using-aws-s3-in-r/#accounts-and-credentials)
 
 <https://us-east-1.console.aws.amazon.com/s3/buckets/oceanmetrics.io-public>
@@ -77,6 +77,28 @@ Bucket policy for public read access:
     ]
 }
 ```
+
+Policy for Cross-origin resource sharing (CORS):
+
+- [Elements of a CORS configuration - Amazon Simple Storage Service](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ManageCorsUsing.html)
+
+```json
+
+[
+    {
+        "AllowedHeaders": [],
+        "AllowedMethods": [
+            "GET"
+        ],
+        "AllowedOrigins": [
+            "*"
+        ],
+        "ExposeHeaders": []
+    }
+]
+```
+
+## Push parquet to S3
 
 ```{r}
 #| label: push-aws
@@ -142,97 +164,12 @@ open_dataset(glue("s3://{bucket}/{obj}")) |>
   mapView(layer.name = "A counties")
 ```
 
-## Read parquet from S3 using ObservableJS
+## Notes: Google Cloud Storage not working
 
-::: {#map}
-
-```{ojs}
-//| label: read-s3-ojs
-//| libraries: [leaflet, apache-arrow]
-
-// Load libraries in Observable
-L = require("leaflet");
-arrow = require("apache-arrow");
-
-// Load the geoarrow-js library explicitly
-geoarrow = await import("https://cdn.jsdelivr.net/npm/@geoarrow/geoarrow-js@0.3.2/dist/geoarrow.umd.min.js");
-
-// Define bucket and object
-bucket = "oceanmetrics.io-public";
-obj = "nc.parquet";
-url = "https://s3.us-east-1.amazonaws.com/" + bucket + "/" + obj
-
-// Create map
-map = L.map("map").setView([35.5, -80], 7);
-
-// Add basemap
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "© OpenStreetMap contributors"
-}).addTo(map);
-
-// Function to load parquet and display on map
-async function loadParquet() {
-  try {
-    // Fetch parquet file
-    const response = await fetch(url);
-    const arrayBuffer = await response.arrayBuffer();
-
-    // Read parquet file
-    const table = await arrow.Table.from(new Uint8Array(arrayBuffer));
-
-    // Filter counties starting with "A" and select NAME and geom columns
-    const filteredTable = table.filter(
-      arrow.predicate.custom(i => table.getColumn("NAME").get(i).startsWith("A"))
-    ).select(["NAME", "geom"]);
-
-    // Convert arrow geometry to GeoJSON
-    const features = [];
-    const nameColumn = filteredTable.getColumn("NAME");
-    const geomColumn = filteredTable.getColumn("geom");
-
-    // Get the geometry array from geoarrow
-    const geometries = geoarrow.getGeometryArray(geomColumn);
-
-    for (let i = 0; i < filteredTable.numRows; i++) {
-      const name = nameColumn.get(i);
-      const geom = geometries.get(i);
-
-      features.push({
-        type: "Feature",
-        properties: { NAME: name },
-        geometry: geom
-      });
-    }
-
-    // Create and add GeoJSON layer to map
-    const geojsonLayer = L.geoJSON(
-      { type: "FeatureCollection", features: features },
-      {
-        style: { color: "#ff7800", weight: 2, opacity: 0.7 },
-        onEachFeature: (feature, layer) => {
-          layer.bindPopup(feature.properties.NAME);
-        }
-      }
-    ).addTo(map);
-
-    // Fit map to layer bounds
-    map.fitBounds(geojsonLayer.getBounds());
-
-    return "Map loaded successfully";
-  } catch (error) {
-    return `Error loading map: ${error.message}`;
-  }
-}
-
-// Load the map
-loadParquet()
-```
-
-## OLD: Push to Google Cloud Storage [read not working]
-
-- [11. Cloud storage – The {targets} R package user manual](https://books.ropensci.org/targets/cloud-storage.html#:~:text=Install%20the%20googleCloudStorageR%20R%20package,or%20googleCloudStorageR%3A%3Agcs_create_bucket()%20.)
-- [googleCloudStorageR • googleCloudStorageR](https://code.markedmondson.me/googleCloudStorageR/articles/googleCloudStorageR.html)
-- [Integrate Google Cloud Storage and rgee](https://cran.r-project.org/web/packages/rgee/vignettes/rgee05.html): use "fine-grained" 
+- Push to Google Cloud Storage [read not working]
+  - [11. Cloud storage – The {targets} R package user manual](https://books.ropensci.org/targets/cloud-storage.html#:~:text=Install%20the%20googleCloudStorageR%20R%20package,or%20googleCloudStorageR%3A%3Agcs_create_bucket()%20.)
+  - [googleCloudStorageR • googleCloudStorageR](https://code.markedmondson.me/googleCloudStorageR/articles/googleCloudStorageR.html)
+  - [Integrate Google Cloud Storage and rgee](https://cran.r-project.org/web/packages/rgee/vignettes/rgee05.html): use "fine-grained" 
 
 ```{r}
 #| label: push-gcs
@@ -273,9 +210,8 @@ gcs_update_object_acl(
 (url <- gcs_download_url(o))
 ```
 
-## OLD: Reinstall arrow with GCS support [not working]
-
-- [Using cloud storage (S3, GCS) • Arrow R Package](https://arrow.apache.org/docs/r/articles/fs.html)
+- Reinstall arrow with GCS support [not working]
+  - [Using cloud storage (S3, GCS) • Arrow R Package](https://arrow.apache.org/docs/r/articles/fs.html)
 
 ```{r}
 #| label: reinstall-arrow
@@ -302,4 +238,3 @@ open_dataset(nc_pq) |>
   st_as_sf() |> 
   mapView(layer.name = "A counties")
 ```
-
