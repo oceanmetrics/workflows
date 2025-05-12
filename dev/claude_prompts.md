@@ -1,4 +1,15 @@
 
+
+## 2025-05-12.B fix 
+
+I fixed the extra use of `const `, but now the JS Console says "GET 
+https://cdn.jsdelivr.net/npm/geoarrow-js/package.json 404 (Not Found)". I do see 
+the library available at https://www.jsdelivr.com/package/npm/@geoarrow/geoarrow-js, 
+but more specifically only for https://cdn.jsdelivr.net/npm/@geoarrow/geoarrow-js@0.3.2/dist/geoarrow.umd.min.js. 
+Based on how JS libraries get loaded into ObservableJS chunks documented at 
+https://quarto.org/docs/interactive/ojs/libraries.html, fix the code
+
+
 ## 2025-05-12.A re-add observable `{ojs}` version of read-s3 chunk
 
 In @explore_geoarrow.qmd, add another chunk similar to the R chunk 

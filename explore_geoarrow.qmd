@@ -135,11 +135,97 @@ librarian::shelf(
 bucket <- "oceanmetrics.io-public"
 obj    <- "nc.parquet"
 
-open_dataset(glue("s3://{bucket}/{obj}")) |> 
+open_dataset(glue("s3://{bucket}/{obj}")) |>
   filter(startsWith(NAME, "A")) |>
-  select(NAME, geom) |> 
-  st_as_sf() |> 
+  select(NAME, geom) |>
+  st_as_sf() |>
   mapView(layer.name = "A counties")
+```
+
+## Read parquet from S3 using ObservableJS
+
+::: {#map}
+
+```{ojs}
+//| label: read-s3-ojs
+//| libraries: [leaflet, apache-arrow]
+
+// Load libraries in Observable
+L = require("leaflet");
+arrow = require("apache-arrow");
+
+// Load the geoarrow-js library explicitly
+geoarrow = await import("https://cdn.jsdelivr.net/npm/@geoarrow/geoarrow-js@0.3.2/dist/geoarrow.umd.min.js");
+
+// Define bucket and object
+bucket = "oceanmetrics.io-public";
+obj = "nc.parquet";
+url = "https://s3.us-east-1.amazonaws.com/" + bucket + "/" + obj
+
+// Create map
+map = L.map("map").setView([35.5, -80], 7);
+
+// Add basemap
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "© OpenStreetMap contributors"
+}).addTo(map);
+
+// Function to load parquet and display on map
+async function loadParquet() {
+  try {
+    // Fetch parquet file
+    const response = await fetch(url);
+    const arrayBuffer = await response.arrayBuffer();
+
+    // Read parquet file
+    const table = await arrow.Table.from(new Uint8Array(arrayBuffer));
+
+    // Filter counties starting with "A" and select NAME and geom columns
+    const filteredTable = table.filter(
+      arrow.predicate.custom(i => table.getColumn("NAME").get(i).startsWith("A"))
+    ).select(["NAME", "geom"]);
+
+    // Convert arrow geometry to GeoJSON
+    const features = [];
+    const nameColumn = filteredTable.getColumn("NAME");
+    const geomColumn = filteredTable.getColumn("geom");
+
+    // Get the geometry array from geoarrow
+    const geometries = geoarrow.getGeometryArray(geomColumn);
+
+    for (let i = 0; i < filteredTable.numRows; i++) {
+      const name = nameColumn.get(i);
+      const geom = geometries.get(i);
+
+      features.push({
+        type: "Feature",
+        properties: { NAME: name },
+        geometry: geom
+      });
+    }
+
+    // Create and add GeoJSON layer to map
+    const geojsonLayer = L.geoJSON(
+      { type: "FeatureCollection", features: features },
+      {
+        style: { color: "#ff7800", weight: 2, opacity: 0.7 },
+        onEachFeature: (feature, layer) => {
+          layer.bindPopup(feature.properties.NAME);
+        }
+      }
+    ).addTo(map);
+
+    // Fit map to layer bounds
+    map.fitBounds(geojsonLayer.getBounds());
+
+    return "Map loaded successfully";
+  } catch (error) {
+    return `Error loading map: ${error.message}`;
+  }
+}
+
+// Load the map
+loadParquet()
 ```
 
 ## OLD: Push to Google Cloud Storage [read not working]
