@@ -4,7 +4,7 @@ title: "Explore geoarrow"
 
 ## Write parquet locally
 
--   [geoarrow-r](https://geoarrow.org/geoarrow-r/)
+- [geoarrow-r](https://geoarrow.org/geoarrow-r/)
 
 ```{r}
 #| label: write-parquet
@@ -52,14 +52,14 @@ open_dataset(nc_pq) |>
 
 ## Push parquet to AWS S3 Bucket
 
--   [README](https://cran.r-project.org/web/packages/aws.s3/readme/README.html)
--   [Using Amazon S3 with R – Notes from a data witch](https://blog.djnavarro.net/posts/2022-03-17_using-aws-s3-in-r/#accounts-and-credentials)
+- [README](https://cran.r-project.org/web/packages/aws.s3/readme/README.html)
+- [Using Amazon S3 with R – Notes from a data witch](https://blog.djnavarro.net/posts/2022-03-17_using-aws-s3-in-r/#accounts-and-credentials)
 
 <https://us-east-1.console.aws.amazon.com/s3/buckets/oceanmetrics.io-public>
 
 Bucket policy for public read access:
 
-``` json
+```json
 {
     "Version": "2012-10-17",
     "Statement": [
@@ -76,26 +76,6 @@ Bucket policy for public read access:
         }
     ]
 }
-```
-
-Policy for Cross-origin resource sharing (CORS):
-
-- [Elements of a CORS configuration - Amazon Simple Storage Service](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ManageCorsUsing.html)
-
-```json
-
-[
-    {
-        "AllowedHeaders": [],
-        "AllowedMethods": [
-            "GET"
-        ],
-        "AllowedOrigins": [
-            "*"
-        ],
-        "ExposeHeaders": []
-    }
-]
 ```
 
 ```{r}
@@ -162,277 +142,11 @@ open_dataset(glue("s3://{bucket}/{obj}")) |>
   mapView(layer.name = "A counties")
 ```
 
-## Create GeoJSON from parquet for easier JavaScript consumption
+## OLD: Push to Google Cloud Storage [read not working]
 
-```{r}
-#| label: convert-to-geojson
-#| eval: true
-
-librarian::shelf(
-  arrow, dplyr, geoarrow, glue, jsonlite, mapview, sf,
-  quiet = T)
-
-bucket <- "oceanmetrics.io-public"
-obj    <- "nc.parquet"
-
-# Convert the "A" counties to GeoJSON and save to a file
-if (!file.exists(here("data/geoarrow/nc_a_counties.geojson"))) {
-  # Read the parquet file from S3
-  nc_a <- open_dataset(glue("s3://{bucket}/{obj}")) |>
-    filter(startsWith(NAME, "A")) |>
-    select(NAME, geom) |>
-    st_as_sf()
-
-  # Write as GeoJSON
-  st_write(
-    nc_a,
-    here("data/geoarrow/nc_a_counties.geojson"),
-    driver = "GeoJSON")
-
-  # Also push to S3
-  if (require(aws.s3) && object_exists(bucket)) {
-    put_object(
-      here("data/geoarrow/nc_a_counties.geojson"),
-      "nc_a_counties.geojson",
-      bucket)
-  }
-}
-
-# Show the conversion output
-file.info(here("data/geoarrow/nc_a_counties.geojson"))$size/1024
-```
-
-## Read parquet from S3 using Observable JavaScript
-
-```{=html}
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
-```
-
-```{ojs}
-//| label: read-s3-js
-//| code-fold: true
-
-// We're now using OJS require() which handles dependency loading,
-// but we'll keep a small delay to ensure UI elements are ready
-function waitForScripts() {
-  return new Promise(resolve => setTimeout(resolve, 300))
-}
-
-// Define the sources
-bucket = "oceanmetrics.io-public"
-obj = "nc.parquet"
-geojsonObj = "nc_a_counties.geojson"
-// url = "https://" + bucket + ".s3.amazonaws.com/" + obj
-url = "https://s3.us-east-1.amazonaws.com/" + bucket + "/" + obj
-geojsonUrl = "https://s3.us-east-1.amazonaws.com/" + bucket + "/" + geojsonObj
-
-// Create a map container
-viewof map = {
-  const container = document.createElement("div")
-  container.style.height = "500px"
-  return container
-}
-
-// Use OJS Observable require feature to check if dependencies are available
-checkDependencies = {
-  return html`<div>Using Observable JS require() for dependency management</div>`
-}
-
-// Create the map
-mapData = {
-  // Create a promise-based solution for better compatibility
-  return new Promise(async (resolve) => {
-    // Wait for scripts to load first
-    await waitForScripts()
-    try {
-      // Import Leaflet
-      const L = await require("leaflet@1.9.4")
-
-      // Create Leaflet map
-      const map = L.map(viewof map).setView([35.6, -79.4], 7)
-
-      // Add base map
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-      }).addTo(map)
-
-      // Load parquet file from S3
-      const response = await fetch(url)
-      const buffer = await response.arrayBuffer()
-
-      // Directly import arrow using require (with specific functions)
-      const arrow = await require("apache-arrow@14.0.2")
-      console.log("Arrow loaded via require:", arrow)
-
-      // Make sure tableFromIPC is available
-      if (!arrow.tableFromIPC) {
-        console.error("tableFromIPC not found, importing directly")
-        const { tableFromIPC } = await require("apache-arrow@14.0.2/Arrow")
-        arrow.tableFromIPC = tableFromIPC
-      }
-
-      // Attempt to parse Parquet using parquet-wasm
-      let table
-      try {
-        console.log("Loading parquet-wasm...")
-        const parquetWasm = await require("parquet-wasm@0.4.2")
-
-        // Initialize wasm and parse parquet file
-        console.log("Initializing parquet-wasm...")
-        await parquetWasm.default()
-        const parquetData = new Uint8Array(buffer)
-        console.log("Parsing parquet data...")
-        const arrowTable = parquetWasm.readParquet(parquetData)
-
-        // Convert to Arrow table
-        console.log("Converting to Arrow table...")
-        table = arrow.tableFromIPC(arrowTable.intoIPCStream())
-      } catch (parquetError) {
-        console.error("Error parsing with parquet-wasm:", parquetError)
-
-        // Fallback: Try using arrow-js directly (if it supports Parquet)
-        try {
-          console.log("Trying alternative parquet parsing methods...")
-
-          if (arrow.tableFromParquet) {
-            table = await arrow.tableFromParquet(new Uint8Array(buffer))
-          } else if (arrow.readParquet) {
-            table = await arrow.readParquet(new Uint8Array(buffer))
-          } else {
-            throw new Error("No suitable method found to parse Parquet files")
-          }
-        } catch (fallbackError) {
-          console.error("Fallback parsing also failed:", fallbackError)
-          // Final fallback: Try loading the pre-converted GeoJSON
-          console.log("Attempting to load pre-converted GeoJSON instead...")
-          return fetch(geojsonUrl)
-            .then(response => {
-              if (!response.ok) {
-                throw new Error(`Failed to fetch GeoJSON: ${response.status} ${response.statusText}`)
-              }
-              return response.json()
-            })
-            .then(geojsonData => {
-              // We'll handle this GeoJSON directly later
-              // Skip all parquet parsing and table operations
-              console.log("Successfully loaded GeoJSON data", geojsonData)
-              throw {
-                name: "UseGeoJSONInstead",
-                message: "Using GeoJSON instead of Parquet",
-                geojsonData
-              }
-            })
-        }
-      }
-
-      // Get column names for debugging
-      console.log("Columns:", table.schema.fields.map(f => f.name))
-
-      // Filter for counties starting with 'A'
-      const nameColumn = table.getColumn('NAME')
-      const indices = []
-
-      // Manually filter counties starting with 'A'
-      for (let i = 0; i < nameColumn.length; i++) {
-        const name = nameColumn.get(i).toString()
-        if (name.startsWith('A')) {
-          indices.push(i)
-        }
-      }
-
-      console.log(`Found ${indices.length} counties starting with 'A'`)
-
-      // Import d3 directly
-      const d3 = await require("d3@7.8.5")
-
-      // Create filtered table
-      const filtered = table.select(table.schema.fields.map(f => f.name))
-                           .filter(d3.range(table.numRows).map(i => indices.includes(i)))
-
-      // Convert to GeoJSON using geoarrow
-      let geoJSON
-      try {
-        // Import geoarrow directly
-        const geoarrow = await require("geoarrow-js@0.2.1")
-
-        // Use the imported geoarrow module
-        geoJSON = geoarrow.tableToGeoJSON(filtered)
-      } catch (error) {
-        console.error("Error converting to GeoJSON:", error)
-
-        // Fallback: Manual GeoJSON creation for demonstration
-        // This is just a placeholder showing counties as simple polygons
-        geoJSON = {
-          type: "FeatureCollection",
-          features: indices.map(i => ({
-            type: "Feature",
-            properties: { NAME: nameColumn.get(i).toString() },
-            geometry: {
-              type: "Polygon",
-              coordinates: [
-                [[-79.5, 35.5], [-79.5, 36], [-79, 36], [-79, 35.5], [-79.5, 35.5]]
-              ]
-            }
-          }))
-        }
-      }
-
-      // Add GeoJSON to map
-      L.geoJSON(geoJSON, {
-        style: {
-          color: "#ff7800",
-          weight: 2,
-          opacity: 0.65
-        },
-        onEachFeature: (feature, layer) => {
-          if (feature.properties && feature.properties.NAME) {
-            layer.bindPopup(`<b>${feature.properties.NAME}</b>`)
-          }
-        }
-      }).addTo(map)
-
-      resolve("Map loaded successfully with counties starting with 'A'")
-    } catch (error) {
-      console.error("Error loading data:", error)
-
-      // Check if this is our special GeoJSON case
-      if (error && error.name === "UseGeoJSONInstead" && error.geojsonData) {
-        console.log("Using pre-converted GeoJSON data instead")
-
-        // Add the GeoJSON directly to the map
-        L.geoJSON(error.geojsonData, {
-          style: {
-            color: "#ff7800",
-            weight: 2,
-            opacity: 0.65
-          },
-          onEachFeature: (feature, layer) => {
-            if (feature.properties && feature.properties.NAME) {
-              layer.bindPopup(`<b>${feature.properties.NAME}</b>`)
-            }
-          }
-        }).addTo(map)
-
-        resolve("Map loaded successfully with counties starting with 'A' (using GeoJSON)")
-        return
-      }
-
-      // Add error message to map
-      const errorDiv = document.createElement('div')
-      errorDiv.innerHTML = `<p style="color: red;">Error loading data: ${error.message}</p>`
-      viewof map.appendChild(errorDiv)
-
-      resolve("Error: " + error.message)
-    }
-  })
-}
-```
-
-## OLD: Push to Google Cloud Storage \[read not working\]
-
--   [11. Cloud storage – The {targets} R package user manual](https://books.ropensci.org/targets/cloud-storage.html#:~:text=Install%20the%20googleCloudStorageR%20R%20package,or%20googleCloudStorageR%3A%3Agcs_create_bucket()%20.)
--   [googleCloudStorageR • googleCloudStorageR](https://code.markedmondson.me/googleCloudStorageR/articles/googleCloudStorageR.html)
--   [Integrate Google Cloud Storage and rgee](https://cran.r-project.org/web/packages/rgee/vignettes/rgee05.html): use "fine-grained"
+- [11. Cloud storage – The {targets} R package user manual](https://books.ropensci.org/targets/cloud-storage.html#:~:text=Install%20the%20googleCloudStorageR%20R%20package,or%20googleCloudStorageR%3A%3Agcs_create_bucket()%20.)
+- [googleCloudStorageR • googleCloudStorageR](https://code.markedmondson.me/googleCloudStorageR/articles/googleCloudStorageR.html)
+- [Integrate Google Cloud Storage and rgee](https://cran.r-project.org/web/packages/rgee/vignettes/rgee05.html): use "fine-grained" 
 
 ```{r}
 #| label: push-gcs
@@ -473,9 +187,9 @@ gcs_update_object_acl(
 (url <- gcs_download_url(o))
 ```
 
-## OLD: Reinstall arrow with GCS support \[not working\]
+## OLD: Reinstall arrow with GCS support [not working]
 
--   [Using cloud storage (S3, GCS) • Arrow R Package](https://arrow.apache.org/docs/r/articles/fs.html)
+- [Using cloud storage (S3, GCS) • Arrow R Package](https://arrow.apache.org/docs/r/articles/fs.html)
 
 ```{r}
 #| label: reinstall-arrow
@@ -502,3 +216,4 @@ open_dataset(nc_pq) |>
   st_as_sf() |> 
   mapView(layer.name = "A counties")
 ```
+

@@ -1,4 +1,30 @@
 
+## 2025-05-12.A re-add observable `{ojs}` version of read-s3 chunk
+
+In @explore_geoarrow.qmd, add another chunk similar to the R chunk 
+labeled "read-s3" except using observable JavaScript `{ojs}` instead of R `{r}`. Include
+all of the necessary JavaScript libraries using the Quarto's built-in mechanism 
+for OJS dependencies. Note that based on @_quarto.yml the Quarto document is
+rendered @_output/ (using the `quarto render` command). The contents of this 
+folder @_output/ is what gets used by Github Pages to render the website (
+so any files that do not get copied to this folder will not be available on the website).
+
+
+to read and 
+  interactively map the geospatial polygons data stored in the AWS S3 bucket.
+  
+- Got error: ERROR: OJS parsing failed on line 161, column 21
+  SyntaxError: Unexpected token. Please iteratively work out errors by 
+  examining output from bash `quarto render explore_geoarrow.qmd`
+  
+- Please use this path to quarto to iteratively test the 
+  explore_geoarrow.qmd until it is working without errors: 
+  /Applications/RStudio.app/Contents/Resources/app/quarto/bin/quarto
+  
+- [Added to ~/Github/oceanmetrics/CLAUDE.md]:
+  - **Debugging/Evaluation**: To render Quarto documents (*.qmd) use the path `/Applications/RStudio.app/Contents/Resources/app/quarto/bin/quarto`. ]
+  
+
 ## 2025-05-12.c read-s3: fix OJS table load error
 
 Ok, after turning on CORS and fixing the S3 URL I am seeing the leaflet map showing up, but in the JavaScript Console        │
