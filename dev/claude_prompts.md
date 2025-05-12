@@ -1,5 +1,25 @@
 
-## 2025-05-12 add observable `{ojs}` version of read-s3 chunk
+## 2025-05-12.b read-s3: fix OJS dependencies error
+
+Fix the error when looking at @workflows/_output/explore_geoarrow.html 
+after quarto render @workflows/explore_geoarrow.qmd on both local and remote web server:
+
+OJS Error
+RequireError: unable to load package.json
+
+Use Quarto's built-in mechanism for OJS dependencies. This is often more 
+reliable than using `require()` directly.
+
+
+```bash
+brew install node
+node -v    # v23.11.0
+npm -v     # 11.3.0
+which npm  # /opt/homebrew/bin/npm
+npm install @alex.garcia/unofficial-observablehq-compiler
+```
+
+## 2025-05-12.a add observable `{ojs}` version of read-s3 chunk
 
 - In @workflows/explore_geoarrow.qmd, add another chunk similar to the R chunk 
   labeled "read-s3" except using observable `{ojs}` instead of R `{r}`,

@@ -78,6 +78,26 @@ Bucket policy for public read access:
 }
 ```
 
+Policy for Cross-origin resource sharing (CORS):
+
+- [Elements of a CORS configuration - Amazon Simple Storage Service](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ManageCorsUsing.html)
+
+```json
+
+[
+    {
+        "AllowedHeaders": [],
+        "AllowedMethods": [
+            "GET"
+        ],
+        "AllowedOrigins": [
+            "*"
+        ],
+        "ExposeHeaders": []
+    }
+]
+```
+
 ```{r}
 #| label: push-aws
 
@@ -145,27 +165,35 @@ open_dataset(glue("s3://{bucket}/{obj}")) |>
 ## Read parquet from S3 using Observable JavaScript
 
 ```{ojs}
+//| label: read-s3-js-setup
+//| output: false
+
+// Add JavaScript dependencies using URLs instead of require
+// This approach avoids the package.json loading issue
+
+// Apache Arrow
+apacheArrowScript = html`<script src="https://cdn.jsdelivr.net/npm/apache-arrow@14.0.2/Arrow.es2015.min.js"></script>`
+
+// D3.js
+d3Script = html`<script src="https://cdn.jsdelivr.net/npm/d3@7.8.5/dist/d3.min.js"></script>`
+
+// Leaflet
+leafletScript = html`<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>`
+leafletCSS = html`<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">`
+
+// GeoArrow
+geoarrowScript = html`<script src="https://cdn.jsdelivr.net/npm/geoarrow-js@0.2.1/dist/geoarrow.umd.js"></script>`
+```
+
+```{ojs}
 //| label: read-s3-js
-
-// Load required libraries using Observable's require syntax
-arrow = require("apache-arrow@14.0.2")
-d3 = require("d3@7.8.5")
-
-// Load leaflet with CSS
-L = require.alias({
-  leaflet: "leaflet@1.9.4"
-})
-
-// Load leaflet CSS
-leafletCSS = html`<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />`
-
-// Load geoarrow
-geoarrow = require("geoarrow-js@0.2.1")
+//| code-fold: true
 
 // Define the source
 bucket = "oceanmetrics.io-public"
 obj = "nc.parquet"
-url = "https://" + bucket + ".s3.amazonaws.com/" + obj
+// url = "https://" + bucket + ".s3.amazonaws.com/" + obj
+url = "https://s3.us-east-1.amazonaws.com/" + bucket + "/" + obj
 
 // Create a map container
 viewof map = {
@@ -191,8 +219,8 @@ mapData = {
       const response = await fetch(url)
       const buffer = await response.arrayBuffer()
 
-      // Convert to Arrow table
-      const table = await arrow.Table.from(new Uint8Array(buffer))
+      // Convert to Arrow table using global Arrow object
+      const table = await window.Arrow.Table.from(new Uint8Array(buffer))
 
       // Get column names for debugging
       console.log("Columns:", table.schema.fields.map(f => f.name))
@@ -213,12 +241,13 @@ mapData = {
 
       // Create filtered table
       const filtered = table.select(table.schema.fields.map(f => f.name))
-                           .filter(d3.range(table.numRows).map(i => indices.includes(i)))
+                           .filter(window.d3.range(table.numRows).map(i => indices.includes(i)))
 
       // Convert to GeoJSON using geoarrow
       let geoJSON
       try {
-        geoJSON = geoarrow.tableToGeoJSON(filtered)
+        // Access the geoarrow module functions from global scope
+        geoJSON = window.geoarrow.tableToGeoJSON(filtered)
       } catch (error) {
         console.error("Error converting to GeoJSON:", error)
 
