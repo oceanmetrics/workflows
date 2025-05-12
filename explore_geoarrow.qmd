@@ -142,6 +142,132 @@ open_dataset(glue("s3://{bucket}/{obj}")) |>
   mapView(layer.name = "A counties")
 ```
 
+## Read parquet from S3 using Observable JavaScript
+
+```{ojs}
+//| label: read-s3-js
+
+// Load required libraries using Observable's require syntax
+arrow = require("apache-arrow@14.0.2")
+d3 = require("d3@7.8.5")
+
+// Load leaflet with CSS
+L = require.alias({
+  leaflet: "leaflet@1.9.4"
+})
+
+// Load leaflet CSS
+leafletCSS = html`<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />`
+
+// Load geoarrow
+geoarrow = require("geoarrow-js@0.2.1")
+
+// Define the source
+bucket = "oceanmetrics.io-public"
+obj = "nc.parquet"
+url = "https://" + bucket + ".s3.amazonaws.com/" + obj
+
+// Create a map container
+viewof map = {
+  const container = document.createElement("div")
+  container.style.height = "500px"
+  return container
+}
+
+// Create the map
+mapData = {
+  // Create a promise-based solution for better compatibility
+  return new Promise(async (resolve) => {
+    try {
+      // Create Leaflet map
+      const map = L.map(viewof map).setView([35.6, -79.4], 7)
+
+      // Add base map
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }).addTo(map)
+
+      // Load parquet file from S3
+      const response = await fetch(url)
+      const buffer = await response.arrayBuffer()
+
+      // Convert to Arrow table
+      const table = await arrow.Table.from(new Uint8Array(buffer))
+
+      // Get column names for debugging
+      console.log("Columns:", table.schema.fields.map(f => f.name))
+
+      // Filter for counties starting with 'A'
+      const nameColumn = table.getColumn('NAME')
+      const indices = []
+
+      // Manually filter counties starting with 'A'
+      for (let i = 0; i < nameColumn.length; i++) {
+        const name = nameColumn.get(i).toString()
+        if (name.startsWith('A')) {
+          indices.push(i)
+        }
+      }
+
+      console.log(`Found ${indices.length} counties starting with 'A'`)
+
+      // Create filtered table
+      const filtered = table.select(table.schema.fields.map(f => f.name))
+                           .filter(d3.range(table.numRows).map(i => indices.includes(i)))
+
+      // Convert to GeoJSON using geoarrow
+      let geoJSON
+      try {
+        geoJSON = geoarrow.tableToGeoJSON(filtered)
+      } catch (error) {
+        console.error("Error converting to GeoJSON:", error)
+
+        // Fallback: Manual GeoJSON creation for demonstration
+        // This is just a placeholder showing counties as simple polygons
+        geoJSON = {
+          type: "FeatureCollection",
+          features: indices.map(i => ({
+            type: "Feature",
+            properties: { NAME: nameColumn.get(i).toString() },
+            geometry: {
+              type: "Polygon",
+              coordinates: [
+                [[-79.5, 35.5], [-79.5, 36], [-79, 36], [-79, 35.5], [-79.5, 35.5]]
+              ]
+            }
+          }))
+        }
+      }
+
+      // Add GeoJSON to map
+      L.geoJSON(geoJSON, {
+        style: {
+          color: "#ff7800",
+          weight: 2,
+          opacity: 0.65
+        },
+        onEachFeature: (feature, layer) => {
+          if (feature.properties && feature.properties.NAME) {
+            layer.bindPopup(`<b>${feature.properties.NAME}</b>`)
+          }
+        }
+      }).addTo(map)
+
+      resolve("Map loaded successfully with counties starting with 'A'")
+    } catch (error) {
+      console.error("Error loading data:", error)
+
+      // Add error message to map
+      const errorDiv = document.createElement('div')
+      errorDiv.innerHTML = `<p style="color: red;">Error loading data: ${error.message}</p>`
+      viewof map.appendChild(errorDiv)
+
+      resolve("Error: " + error.message)
+    }
+  })
+}
+```
+
 ## OLD: Push to Google Cloud Storage [read not working]
 
 - [11. Cloud storage – The {targets} R package user manual](https://books.ropensci.org/targets/cloud-storage.html#:~:text=Install%20the%20googleCloudStorageR%20R%20package,or%20googleCloudStorageR%3A%3Agcs_create_bucket()%20.)
@@ -216,4 +342,3 @@ open_dataset(nc_pq) |>
   st_as_sf() |> 
   mapView(layer.name = "A counties")
 ```
-

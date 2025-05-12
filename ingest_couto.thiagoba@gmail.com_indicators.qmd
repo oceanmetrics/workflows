@@ -1,0 +1,79 @@
+---
+title: "ingest_couto.thiagoba@gmail.com_indicators"
+---
+
+```{r}
+librarian::shelf(
+  dplyr, fs, glue, here, sf, tidyr, purrr, janitor)
+
+dir_raw <- '~/My Drive/projects/oceanmetrics/data/raw/couto.thiagoba@gmail.com_indicators'
+dir_shp <- glue("{dir_raw}/{c('Indicators_shapefiles','Indicators_uncertainty/Uncertainty_Shapes')}")
+
+d_shp <- tibble(
+  path_shp = dir_ls(dir_shp, glob = '*.shp')) |> 
+  mutate(
+    shp       = basename(shp))
+    data      = map(shp, ~ st_read(.x, quiet = TRUE)),
+    nrow      = map_int(data, nrow),
+    ncol      = map_int(data, ncol)
+    data_cols = map(data, names),
+    cols_chr  = map_chr(data_cols, paste, collapse = ', ')) |> 
+  relocate(shp_base)
+d_shp |> 
+  select(-shp, -data_cols) |> 
+  View()
+d_shp$cols_chr
+
+
+all.equal($cols_chr)
+
+
+d_shp$data[[1]]$geometry[1] == d_shp$data[[2]]$geometry[1]
+d_shp$data[[1]]$FID[1] == d_shp$data[[2]]$FID[1]
+
+# check if all FID are the same
+d_shp |> 
+  mutate(
+    FID = map(data, ~ .x$FID)) |> 
+  select(FID) |> 
+  unnest(cols = c(FID)) |> 
+  distinct() |> 
+  group_by(FID) |> 
+  summarise(n = n()) |> 
+  ungroup() |> 
+  arrange(desc(n))
+
+
+d_shp2 |> 
+  select(shp, nrow, ncol)
+
+# get unique geometries across all shapefiles
+d_geom <- d_shp |> 
+  mutate(
+    geom = map(data, ~ st_geometry(.x))) |> 
+  select(geom) |> 
+  unnest(cols = c(geom)) |> 
+  distinct()
+dim(d_geom)
+
+|> 
+  st_make_valid() |> 
+  st_union() |> 
+  st_cast('MULTIPOLYGON') |> 
+  st_make_valid() |> 
+  st_simplify(dTolerance = 0.01) |> 
+  st_transform(crs = 'EPSG:4326') -> d_geom
+
+
+st_layers(dir_shp)
+
+```
+
+You can add options to executable code like this
+
+```{r}
+#| echo: false
+2 * 2
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
