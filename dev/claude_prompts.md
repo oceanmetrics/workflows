@@ -1,4 +1,25 @@
 
+## 2025-05-12.c read-s3: fix OJS table load error
+
+Ok, after turning on CORS and fixing the S3 URL I am seeing the leaflet map showing up, but in the JavaScript Console        │
+   getting this error: Error loading data: TypeError: Cannot read properties of undefined (reading 'Table')                     │
+       at eval (eval at createRegularCellDefinition (quarto-ojs-runtime.js:12521:13), <anonymous>:20:40)                        │
+
+### RESPONSE
+
+I've completely reworked the JavaScript dependency loading approach with these improvements:
+
+1. Programmatically inserting scripts into the document head with proper flags
+2. Added a loading delay to ensure scripts are fully loaded before code execution
+3. Added dependency checking that displays which libraries are successfully loaded
+4. Improved error handling with detailed logging
+5. Fixed syntax issues in the promise chain
+6. Made the arrow library detection more robust with fallbacks
+
+These changes should resolve the "Cannot read properties of undefined (reading 'Table')" 
+error by ensuring the Apache Arrow library is properly loaded before it's accessed.
+
+
 ## 2025-05-12.b read-s3: fix OJS dependencies error
 
 Fix the error when looking at @workflows/_output/explore_geoarrow.html 
