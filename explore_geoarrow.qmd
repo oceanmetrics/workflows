@@ -4,7 +4,7 @@ title: "Explore geoarrow"
 
 ## Write parquet locally
 
-- [geoarrow-r](https://geoarrow.org/geoarrow-r/)
+-   [geoarrow-r](https://geoarrow.org/geoarrow-r/)
 
 ```{r}
 #| label: write-parquet
@@ -52,14 +52,14 @@ open_dataset(nc_pq) |>
 
 ## Push parquet to AWS S3 Bucket
 
-- [README](https://cran.r-project.org/web/packages/aws.s3/readme/README.html)
-- [Using Amazon S3 with R – Notes from a data witch](https://blog.djnavarro.net/posts/2022-03-17_using-aws-s3-in-r/#accounts-and-credentials)
+-   [README](https://cran.r-project.org/web/packages/aws.s3/readme/README.html)
+-   [Using Amazon S3 with R – Notes from a data witch](https://blog.djnavarro.net/posts/2022-03-17_using-aws-s3-in-r/#accounts-and-credentials)
 
 <https://us-east-1.console.aws.amazon.com/s3/buckets/oceanmetrics.io-public>
 
 Bucket policy for public read access:
 
-```json
+``` json
 {
     "Version": "2012-10-17",
     "Statement": [
@@ -268,11 +268,11 @@ mapData = {
 }
 ```
 
-## OLD: Push to Google Cloud Storage [read not working]
+## OLD: Push to Google Cloud Storage \[read not working\]
 
-- [11. Cloud storage – The {targets} R package user manual](https://books.ropensci.org/targets/cloud-storage.html#:~:text=Install%20the%20googleCloudStorageR%20R%20package,or%20googleCloudStorageR%3A%3Agcs_create_bucket()%20.)
-- [googleCloudStorageR • googleCloudStorageR](https://code.markedmondson.me/googleCloudStorageR/articles/googleCloudStorageR.html)
-- [Integrate Google Cloud Storage and rgee](https://cran.r-project.org/web/packages/rgee/vignettes/rgee05.html): use "fine-grained" 
+-   [11. Cloud storage – The {targets} R package user manual](https://books.ropensci.org/targets/cloud-storage.html#:~:text=Install%20the%20googleCloudStorageR%20R%20package,or%20googleCloudStorageR%3A%3Agcs_create_bucket()%20.)
+-   [googleCloudStorageR • googleCloudStorageR](https://code.markedmondson.me/googleCloudStorageR/articles/googleCloudStorageR.html)
+-   [Integrate Google Cloud Storage and rgee](https://cran.r-project.org/web/packages/rgee/vignettes/rgee05.html): use "fine-grained"
 
 ```{r}
 #| label: push-gcs
@@ -313,9 +313,9 @@ gcs_update_object_acl(
 (url <- gcs_download_url(o))
 ```
 
-## OLD: Reinstall arrow with GCS support [not working]
+## OLD: Reinstall arrow with GCS support \[not working\]
 
-- [Using cloud storage (S3, GCS) • Arrow R Package](https://arrow.apache.org/docs/r/articles/fs.html)
+-   [Using cloud storage (S3, GCS) • Arrow R Package](https://arrow.apache.org/docs/r/articles/fs.html)
 
 ```{r}
 #| label: reinstall-arrow
