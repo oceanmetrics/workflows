@@ -1,0 +1,15 @@
+format:
+  html:
+    toc: true              # md to exclude: {.unnumbered .unlisted}
+    toc-depth: 3
+    toc-expand: 2
+    number-sections: true  # md to exclude: {.unnumbered}
+    number-depth: 3
+    code-fold: show
+    code-tools: true
+editor: source
+editor_options: 
+  chunk_output_type: console
+project:
+  type: default
+  output-dir: _output

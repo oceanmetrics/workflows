@@ -1,0 +1,219 @@
+---
+title: "Explore geoarrow"
+---
+
+## Write parquet locally
+
+- [geoarrow-r](https://geoarrow.org/geoarrow-r/)
+
+```{r}
+#| label: write-parquet
+
+# packages
+librarian::shelf(
+  arrow, dplyr, geoarrow, here, mapview, sf, tibble,
+  quiet = T)
+
+# paths
+nc_gp <- system.file("gpkg/nc.gpkg", package = "sf")
+nc_pq <- here("data/geoarrow/nc.parquet")
+
+# read geopackage
+nc <- read_sf(nc_gp)
+
+# show North Carolina counties
+mapView(nc)
+
+# write parquet
+if (!file.exists(nc_pq))
+  nc |> 
+    as_tibble() |> 
+    write_parquet(nc_pq)
+
+# compare file sizes
+tibble(
+  obj = c("nc_gp", "nc_pq")) |>
+  mutate(
+    mb = file.info(c(nc_gp, nc_pq))$size/1024^2)
+```
+
+## Read parquet locally
+
+```{r}
+#| label: read-local
+
+# filter and map
+open_dataset(nc_pq) |> 
+  filter(startsWith(NAME, "A")) |>
+  select(NAME, geom) |> 
+  st_as_sf() |> 
+  mapView(layer.name = "A counties")
+```
+
+## Push parquet to AWS S3 Bucket
+
+- [README](https://cran.r-project.org/web/packages/aws.s3/readme/README.html)
+- [Using Amazon S3 with R – Notes from a data witch](https://blog.djnavarro.net/posts/2022-03-17_using-aws-s3-in-r/#accounts-and-credentials)
+
+<https://us-east-1.console.aws.amazon.com/s3/buckets/oceanmetrics.io-public>
+
+Bucket policy for public read access:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "PublicReadGetObject",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": [
+                "s3:GetObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::Bucket-Name/*"
+            ]
+        }
+    ]
+}
+```
+
+```{r}
+#| label: push-aws
+
+stopifnot(arrow_with_s3())
+
+librarian::shelf(
+  glue, janitor, readr, tibble,
+  quiet = T)
+options(readr.show_col_types = F)
+
+d_aws <- read_csv(
+  '/Users/bbest/Library/CloudStorage/GoogleDrive-ben@ecoquants.com/My Drive/private/ben_ben@ecoquants.com_console.aws.amazon.com_accessKeys.csv') |> 
+  clean_names()
+Sys.setenv(
+  "AWS_ACCESS_KEY_ID"     = d_aws$access_key_id,
+  "AWS_SECRET_ACCESS_KEY" = d_aws$secret_access_key,
+  "AWS_DEFAULT_REGION"    = "us-east-1")
+bucket <- "oceanmetrics.io-public"
+
+# load/reload aws.s3 to read credentials
+unloadNamespace("aws.s3")
+librarian::shelf(
+  aws.s3,
+  quiet = T)
+# bucketlist()
+
+stopifnot(bucket_exists(bucket))
+stopifnot(exists("nc_pq"))
+
+o      <- basename(nc_pq)
+o_file <- nc_pq
+
+if (!object_exists(o, bucket))
+  put_object(o_file, o, bucket)
+
+# put_acl(o, bucket, acl = "public-read")
+# "The bucket does not allow ACLs"
+
+# check
+o_s3 <- glue("s3://{bucket}/{o}")
+object_exists(o_s3)
+```
+
+## Read parquet from S3
+
+```{r}
+#| label: read-s3
+
+# standalone R chunk
+
+librarian::shelf(
+  arrow, dplyr, geoarrow, glue, mapview, sf,
+  quiet = T)
+
+bucket <- "oceanmetrics.io-public"
+obj    <- "nc.parquet"
+
+open_dataset(glue("s3://{bucket}/{obj}")) |> 
+  filter(startsWith(NAME, "A")) |>
+  select(NAME, geom) |> 
+  st_as_sf() |> 
+  mapView(layer.name = "A counties")
+```
+
+## OLD: Push to Google Cloud Storage [read not working]
+
+- [11. Cloud storage – The {targets} R package user manual](https://books.ropensci.org/targets/cloud-storage.html#:~:text=Install%20the%20googleCloudStorageR%20R%20package,or%20googleCloudStorageR%3A%3Agcs_create_bucket()%20.)
+- [googleCloudStorageR • googleCloudStorageR](https://code.markedmondson.me/googleCloudStorageR/articles/googleCloudStorageR.html)
+- [Integrate Google Cloud Storage and rgee](https://cran.r-project.org/web/packages/rgee/vignettes/rgee05.html): use "fine-grained" 
+
+```{r}
+#| label: push-gcs
+#| eval: false
+
+# set env BEFORE loading googleCloudStorageR
+gcs_json   = "/Users/bbest/Library/CloudStorage/GoogleDrive-ben@ecoquants.com/My Drive/private/offhab-google-service-account_09e7228ac965.json"
+gcs_bucket = "oceanmetrics"
+Sys.setenv(
+  "GCS_DEFAULT_BUCKET" = gcs_bucket,
+  "GCS_AUTH_FILE"      = gcs_json)
+
+# packages
+librarian::shelf(
+  googleCloudStorageR, targets,
+  quiet = T)
+
+gcs_get_bucket(gcs_bucket)
+
+o_file <- nc_pq
+o      <- basename(nc_pq)
+
+# upload
+gcs_upload(
+  file            = o_file,
+  name            = o,
+  object_metadata = gcs_metadata_object(
+    o,
+    metadata = list(
+      state = "NC",
+      notes = "test metadata")))
+
+# make publicly visible
+gcs_update_object_acl(
+  o, entity_type = "allUsers", role = "READER")
+
+# get URL
+(url <- gcs_download_url(o))
+```
+
+## OLD: Reinstall arrow with GCS support [not working]
+
+- [Using cloud storage (S3, GCS) • Arrow R Package](https://arrow.apache.org/docs/r/articles/fs.html)
+
+```{r}
+#| label: reinstall-arrow
+#| eval: false
+
+# Sys.setenv(ARROW_R_DEV=TRUE); install.packages("arrow")
+librarian::shelf("arrow",
+  quiet = T)
+
+# https://github.com/apache/arrow/issues/44859#issuecomment-2502344866
+# brew install openssl@3
+Sys.setenv("ARROW_R_DEV"=TRUE, "NOT_CRAN" = "true")
+install.packages("arrow", type = "source")
+install.packages("arrow")
+
+arrow_with_gcs()
+arrow_info()
+
+nc_pq <- "https://storage.cloud.google.com/oceanmetrics/nc.parquet"
+
+open_dataset(nc_pq) |> 
+  filter(startsWith(NAME, "A")) |>
+  select(NAME, geom) |> 
+  st_as_sf() |> 
+  mapView(layer.name = "A counties")
+```
+
