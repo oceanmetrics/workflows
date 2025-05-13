@@ -164,6 +164,47 @@ open_dataset(glue("s3://{bucket}/{obj}")) |>
   mapView(layer.name = "A counties")
 ```
 
+## Read parquet with ObservableJS
+
+### Read locally
+
+```{ojs}
+//| label: read-ojs-local
+
+ncdb = DuckDBClient.of({
+  nc: FileAttachment("data/geoarrow/nc.parquet")
+})
+
+ncdb.query("SELECT * FROM nc LIMIT 2")
+```
+
+### Read remote S3
+
+```{ojs}
+//| label: read-ojs-s3
+
+db = await DuckDBClient.of()
+
+pq = 'https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/nc.parquet'
+
+db.query("DESCRIBE SELECT * FROM '" + pq + "';") 
+db.query("SELECT * FROM '" + pq + "' WHERE NAME LIKE 'A%';")
+```
+
+Spatial extension `db.query("INSTALL spatial;LOAD spatial;")` not working in Observable `{ojs}` chunk in Quarto:
+
+- [Spatial Extension – DuckDB](https://duckdb.org/docs/stable/extensions/spatial/overview.html)
+- [Spatial Functions – DuckDB](https://duckdb.org/docs/stable/extensions/spatial/functions)
+
+More resources:
+
+- [Using Observable – Quarto](https://quarto.org/docs/computations/ojs.html#libraries)
+- [DuckDB - Database clients | Observable documentation](https://observablehq.com/documentation/data/databases/database-clients#duckdb)
+- [Introducing SQL with DuckDB in your browser / CMU Data Interaction Group | Observable](https://observablehq.com/@cmudig/introducing-sql-with-duckdb)
+- [Reading and Writing Parquet Files – DuckDB](https://duckdb.org/docs/stable/data/parquet/overview.html)
+- [DuckDB 🐤 Spatial 🌎 | Pangea on ObservableHQ](https://observablehq.observablehq.cloud/pangea/duckdb/spatial)
+- [GeoParquet viewer with DuckDB spatial / Éric Mauvière | Observable](https://observablehq.com/@ericmauviere/geoparquet-viewer-with-duckdb-spatial)
+
 ## Notes: Google Cloud Storage not working
 
 - Push to Google Cloud Storage [read not working]
