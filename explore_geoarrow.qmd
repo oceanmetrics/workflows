@@ -169,26 +169,40 @@ open_dataset(glue("s3://{bucket}/{obj}")) |>
 ### Read locally
 
 ```{ojs}
-//| label: read-ojs-local
-
 ncdb = DuckDBClient.of({
   nc: FileAttachment("data/geoarrow/nc.parquet")
-})
+});
 
-ncdb.query("SELECT * FROM nc LIMIT 2")
+nc_a_local = ncdb.query("SELECT * EXCLUDE (geom) FROM nc WHERE NAME LIKE 'A%';");
+Inputs.table(nc_a_local)
 ```
 
 ### Read remote S3
 
 ```{ojs}
-//| label: read-ojs-s3
+db = await DuckDBClient.of();
+```
 
-db = await DuckDBClient.of()
+```{ojs}
+//| eval: false
 
-pq = 'https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/nc.parquet'
+db_sp = {
+  const home_directory = '/tmp';
+  await db.query(`INSTALL spatial;`);
+  await db.query(`LOAD spatial;`);
+  return db;
+}
+```
 
-db.query("DESCRIBE SELECT * FROM '" + pq + "';") 
-db.query("SELECT * FROM '" + pq + "' WHERE NAME LIKE 'A%';")
+```{ojs}
+pq = 'https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/nc.parquet';
+
+nc_flds = db.query(`DESCRIBE SELECT * FROM '` + pq + `';`)
+Inputs.table(nc_flds)
+
+// nc_sp_a_remote = db_sp.query(`SELECT * FROM ST_Read('` + pq + `') WHERE NAME LIKE 'A%';`);
+nc_a_remote = db.query(`SELECT * EXCLUDE (geom) FROM '` + pq + `' WHERE NAME LIKE 'A%';`);
+Inputs.table(nc_a_remote)
 ```
 
 Spatial extension `db.query("INSTALL spatial;LOAD spatial;")` not working in Observable `{ojs}` chunk in Quarto:

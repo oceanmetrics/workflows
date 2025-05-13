@@ -7,9 +7,14 @@ format:
     number-depth: 3
     code-fold: show
     code-tools: true
+date: now
+date-format: "YYYY-MM-DD HH:mm:ss"
 editor: source
 editor_options: 
   chunk_output_type: console
 project:
   type: default
   output-dir: _output
+# Set default options for every bookpage that may or may not include webR.
+webr: 
+  home-dir: /tmp
