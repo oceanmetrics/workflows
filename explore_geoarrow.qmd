@@ -180,18 +180,27 @@ Inputs.table(nc_a_local)
 ### Read remote S3
 
 ```{ojs}
-db = await DuckDBClient.of();
+//| eval: true
+db = {
+  var c = await DuckDBClient.of();
+  /*
+  // Uncomment to install the spatial extension, but this will not work 
+  // in Observable with Quarto
+  //   Error: Invalid Input Error: Attempting to fetch from an unsuccessful 
+  //          query result
+  //   Error: IO Error: Can't find the home directory at '/home/web_user' 
+  //          Specify a home directory using the SET home_directory='/path/to/dir' option.
+  await c.query(`SET home_directory = '/tmp';`);
+  await c.query(`INSTALL spatial;`);
+  await c.query(`LOAD spatial;`);
+  */
+  return c;
+}
 ```
 
 ```{ojs}
-//| eval: false
-
-db_sp = {
-  const home_directory = '/tmp';
-  await db.query(`INSTALL spatial;`);
-  await db.query(`LOAD spatial;`);
-  return db;
-}
+db_settings = db.query(`SELECT * FROM duckdb_settings();`)
+Inputs.table(db_settings)
 ```
 
 ```{ojs}
@@ -200,7 +209,7 @@ pq = 'https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/nc.parquet';
 nc_flds = db.query(`DESCRIBE SELECT * FROM '` + pq + `';`)
 Inputs.table(nc_flds)
 
-// nc_sp_a_remote = db_sp.query(`SELECT * FROM ST_Read('` + pq + `') WHERE NAME LIKE 'A%';`);
+//nc_a_remote = db_sp.query(`SELECT * FROM ST_Read('` + pq + `') WHERE NAME LIKE 'A%';`);
 nc_a_remote = db.query(`SELECT * EXCLUDE (geom) FROM '` + pq + `' WHERE NAME LIKE 'A%';`);
 Inputs.table(nc_a_remote)
 ```
@@ -212,12 +221,17 @@ Spatial extension `db.query("INSTALL spatial;LOAD spatial;")` not working in Obs
 
 More resources:
 
+- [Cloud-Optimized Geospatial Formats Guide](https://guide.cloudnativegeo.org/)
 - [Using Observable – Quarto](https://quarto.org/docs/computations/ojs.html#libraries)
 - [DuckDB - Database clients | Observable documentation](https://observablehq.com/documentation/data/databases/database-clients#duckdb)
 - [Introducing SQL with DuckDB in your browser / CMU Data Interaction Group | Observable](https://observablehq.com/@cmudig/introducing-sql-with-duckdb)
 - [Reading and Writing Parquet Files – DuckDB](https://duckdb.org/docs/stable/data/parquet/overview.html)
 - [DuckDB 🐤 Spatial 🌎 | Pangea on ObservableHQ](https://observablehq.observablehq.cloud/pangea/duckdb/spatial)
 - [GeoParquet viewer with DuckDB spatial / Éric Mauvière | Observable](https://observablehq.com/@ericmauviere/geoparquet-viewer-with-duckdb-spatial)
+- [GeoArrow and GeoParquet in deck.gl / Kyle Barron | Observable](https://observablehq.com/@kylebarron/geoarrow-and-geoparquet-in-deck-gl?collection=@kylebarron/geoparquet)
+- [@geoarrow/deck.gl-layers Polygon Example / Development Seed | Observable](https://observablehq.com/@developmentseed/geoarrow-deck-gl-polygon-example?collection=@developmentseed/geoarrow)
+- [GeoParquet on the Web / Kyle Barron | Observable](https://observablehq.com/@kylebarron/geoparquet-on-the-web?collection=@kylebarron/geoparquet)
+- [Sharing some tools for working with GeoParquet | by Chris Holmes | Radiant Earth Insights | Medium](https://medium.com/radiant-earth-insights/sharing-some-tools-for-working-with-geoparquet-fc5667b27373)
 
 ## Notes: Google Cloud Storage not working
 
