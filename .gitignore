@@ -6,3 +6,4 @@
 CLAUDE.md
 **/.claude/settings.local.json
 _environment
+.DS_Store

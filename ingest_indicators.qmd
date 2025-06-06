@@ -1,0 +1,790 @@
+---
+title: "Ocean Metrics Indicators Data Ingestion Workflow"
+author: "Ocean Metrics Team"
+date: today
+format:
+  html:
+    toc-expand: 1    
+    code-fold: true
+---
+
+## Overview
+
+This workflow processes marine biodiversity indicator data from shapefiles into a structured format suitable for database storage and web visualization. The data includes various marine species groups (fish, sharks, rays, turtles) with seasonal variations and multiple indicator types.
+
+### Data Source
+
+The input data consists of shapefiles containing:
+
+- **Species Groups**: Fish, Sharks, Rays, Red-listed species, Turtles, and All species combined
+- **Temporal Coverage**: Summer and Winter seasons
+- **Indicator Types**: 
+  - Cumulative Uncertainty
+  - Rich Shape (species richness)
+  - Weighted Rich Shape (weighted species richness)
+
+### Workflow Goals
+
+1. Parse and standardize shapefile data from multiple files
+2. Transform data into a normalized long format
+3. Generate layer metadata with human-readable keys and descriptions
+4. Store processed data in PostgreSQL/PostGIS database
+5. Create vector tiles for web visualization (PMTiles format)
+
+### Key Challenges & Considerations
+
+- **Data Volume**: Processing 36 shapefiles with 334,092 data points per field
+- **Standardization**: Ensuring consistent naming conventions across different data sources
+- **Performance**: Optimizing tile generation for web visualization
+- **Maintainability**: Creating reusable code for future data updates
+
+## Data Processing Pipeline
+
+```{mermaid}
+flowchart TD
+    A[Raw Shapefiles<br/>36 files total] --> B[Parse & Extract Metadata]
+    B --> C[Extract Geometry<br/>FID-based]
+    B --> D[Transform to Long Format]
+    D --> E[Generate Layer Keys]
+    E --> F[Create Wide Format]
+    F --> G[Combine with Geometry]
+    G --> H[(PostgreSQL/PostGIS<br/>Database)]
+    G --> I[GeoJSON Export]
+    I --> J[MBTiles<br/>Vector Tiles]
+    J --> K[PMTiles<br/>Web-ready Format]
+    K --> L[S3 Cloud Storage]
+    L --> M[Web Visualization]
+    
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style H fill:#bbf,stroke:#333,stroke-width:2px
+    style M fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+## Environment Setup
+
+### Prerequisites
+
+Before running this workflow, ensure you have the following system dependencies installed:
+
+```bash
+# macOS installation
+brew install tippecanoe  # For MBTiles generation
+brew install pmtiles     # For PMTiles conversion
+```
+
+TODO:
+
+- [ ] Add instructions for Linux and Windows installations
+- [ ] Add installation checks for required system dependencies
+- [ ] Consider containerizing these dependencies for reproducibility
+
+### Load Required Libraries and Configure Paths
+
+This section loads all necessary R packages and sets up file paths for data processing. The workflow uses a combination of spatial data processing (`sf`), database connectivity (`DBI`, `RPostgres`), and data manipulation (`dplyr`, `tidyr`) packages.
+
+```{r setup}
+#| message: false
+#| warning: false
+librarian::shelf(
+  DBI, dplyr, DT, fs, glue, here, janitor, mapgl,
+  sf, tidyr, purrr, readr, RPostgres, 
+  tibble, wdpar,
+  quiet = T)
+options(readr.show_col_types = F)
+
+# Determine environment and set paths accordingly
+is_server   <-  Sys.info()[["sysname"]] == "Linux"
+
+# TODO: Consider using environment variables for these paths
+# TODO: Add validation that all directories exist
+dir_raw     <- '~/My Drive/projects/oceanmetrics/data/raw/couto.thiagoba@gmail.com_indicators'
+dir_shp     <- glue("{dir_raw}/Indicators_AllProducts_may2025/Shapefiles")
+
+# Output file paths
+fid_geo     <- glue("{dir_raw}/fid.geojson")        # Geometry with FID identifiers
+long_csv    <- glue("{dir_raw}/data_long.csv")      # Long format data
+wide_csv    <- glue("{dir_raw}/data_wide.csv")      # Wide format data  
+lyr_csv     <- glue("{dir_raw}/layers.csv")         # Layer metadata
+lyr_lu_csv  <- glue("{dir_raw}/layer_lookup.csv")   # Layer lookup table
+data_geo    <- glue("{dir_raw}/indicators.geojson") # Combined GeoJSON
+data_mbt    <- glue("{dir_raw}/indicators.mbtiles") # MBTiles output
+data_pmt    <- glue("{dir_raw}/indicators.pmtiles") # PMTiles output
+
+# Private credentials location
+dir_private <- ifelse(is_server, "/share/private", "~/My Drive/private")
+db_pass_txt <- glue("{dir_private}/msens-db_admin-pass.txt")
+
+# TODO: Add directory existence checks
+```
+
+### Database Connection
+
+Connect to the PostgreSQL/PostGIS database for storing processed indicator data. The connection uses environment-specific settings to support both development (local) and production (server) environments.
+
+#### Security Note
+
+Database credentials are stored in a separate file outside the repository for security. Ensure the password file exists at the specified location before running.
+
+TODO:
+
+- [ ] Add connection error handling and retry logic
+- [ ] Consider using connection pooling for better performance
+- [ ] Add connection validation before proceeding with data operations
+
+```{r db_con}
+stopifnot(file.exists(db_pass_txt))
+con <- DBI::dbConnect(
+  RPostgres::Postgres(),
+  dbname   = "msens",
+  host     = ifelse(is_server, "postgis", "localhost"),
+  port     = 5432,
+  user     = "admin",
+  password = readLines(db_pass_txt),
+  options  ="-c search_path=oceanmetrics,public")
+```
+
+## Data Transformation
+
+### Overview of Transformation Process
+
+The data transformation involves several key steps:
+
+1. **Metadata Extraction**: Parse filenames to extract indicator type, season, and species group
+2. **Geometry Standardization**: Extract consistent FID-based geometries from all shapefiles
+3. **Data Pivoting**: Transform from wide to long format for better database normalization
+4. **Key Generation**: Create standardized layer keys for consistent referencing
+
+### Parse Shapefiles and Extract Metadata
+
+This section reads all shapefiles, extracts metadata from filenames, and prepares the data for transformation. The filename pattern follows: `{indicator}_{type}_{season}_{group}.shp`
+
+### Extract Geometry and Transform to Long Format
+
+This step extracts the spatial geometry from the shapefiles and transforms the attribute data into a long format suitable for database storage.
+
+```{r shp_to_long}
+#| message: false
+# Parse shapefile filenames to extract metadata components
+# Filename pattern: {indicator}_{type}_{season}_{group}.shp
+# TODO: Add validation for expected filename pattern
+# TODO: Consider logging files that don't match expected pattern
+# TODO: Add error handling for malformed shapefiles
+d_shp <- tibble(
+  path = dir_ls(dir_shp, glob = '*.shp')) |> 
+  mutate(
+    shp       = basename(path),
+    fname     = path_ext_remove(shp),
+    data      = map(path, ~ st_read(.x, quiet = TRUE)),
+    nrow      = map_int(data, nrow),
+    ncol      = map_int(data, ncol),
+    data_cols = map(data, names),
+    cols_chr  = map_chr(data_cols, paste, collapse = ', ')) |> 
+  separate(
+    fname, into = c('ind', 'type', 'season', 'group'),
+    sep = '_', remove = FALSE) |> 
+  select(-fname) |> 
+  relocate(shp, ind, type, season, group)
+
+# summaries ----
+# table(d_shp$ind, d_shp$type)
+#     CumulativeUncertainty RichShape WeightedRichShape
+# Ind                    12        12                12
+#
+# table(d_shp$season, d_shp$group)
+#        All Fish Ray Red-listed Shark Turtle
+# summer   3    3   3          3     3      3
+# winter   3    3   3          3     3      3
+#
+# table(d_shp$cols_chr)
+#            FID, mx_mn_r, ecrg_rc, htspt_c, geometry 
+#                                                  12 
+#                 FID, plt_dt_m_, plt_dt_s_, geometry 
+#                                                  12 
+# FID, Uncrt_c, Uncrt_s, ecrg_ncr, ecrg_ncl, geometry 
+#                                                  12 
+
+# get the geometry from the first shapefile ----
+d_geom <- d_shp$data[[1]] |> 
+  mutate(
+    fid = as.integer(FID)) |> 
+  select(fid) |> 
+  st_transform(4326)
+if (file_exists(fid_geo))
+  file_delete(fid_geo)
+write_sf(d_geom, fid_geo)
+
+# go long with data to relate by fid to geom  ----
+d_long <- d_shp |> 
+  select(ind, type, season, group, data) |>
+  mutate(
+    data = map(data, \(x){
+      x |> 
+        st_drop_geometry() |>
+        select(where(~ !is.character(.))) |>
+        # clean_names() |>
+        pivot_longer(
+          cols = -FID,
+          names_to = 'field', values_to = 'value') |> 
+        rename(fid = FID) } ) ) |> 
+  unnest(data) |> 
+  mutate(
+    fid = as.integer(fid)) |> 
+  filter(!is.na(value))
+write_csv(d_long, long_csv)
+
+# table(d_data$field)
+# ecrg_ncr  ecrg_rc  mx_mn_r plt_dt_m plt_dt_s  uncrt_c  uncrt_s 
+#   334092   334092   334092   334092   334092   334092   334092
+```
+
+### Generate Layer Metadata and Keys
+
+This step creates standardized layer identifiers and human-readable descriptions for each unique combination of species group, indicator type, season, and field.
+
+```{r long_to_lyrs}
+# d_long <- read_csv(long_csv)
+d_geom <- read_sf(fid_geo)
+
+d_lyrs <- d_long |> 
+  distinct(group, type, season, field) |> 
+  arrange(group, type, season, field)
+
+# Create lookup table with all unique values from each column
+d_lyr_lu <- d_lyrs |> 
+  select(group, type, season, field) |> 
+  pivot_longer(everything(), names_to = "column", values_to = "value") |> 
+  distinct() |> 
+  arrange(column, value) |> 
+  mutate(
+    key         = "",
+    description = "")
+
+# Write to CSV
+if (!file_exists(lyr_lu_csv))
+  write_csv(d_lyr_lu, lyr_lu_csv)
+# Edit the lookup table manually
+
+# Read the populated lookup table
+d_lyr_lu <- read_csv(lyr_lu_csv)
+stopifnot(sum(duplicated(d_lyr_lu$key)) == 0)
+
+# Function to get key/description per column from lookup table
+lu <- function(val, desc_type = "k", df_lookup = d_lyr_lu) {
+  col      <- deparse(substitute(val))
+  desc_col <- ifelse(desc_type == "k", "key", "description")
+  
+  df_lookup |> 
+    filter(column == !!col, value == !!val) |> 
+    pull(!!desc_col)
+}
+
+# Generate keys and descriptions for layers with lookup
+d_lyrs <- d_lyrs |> 
+  rowwise() |> 
+  mutate(
+    key         = glue(
+      # key: "{group}_{field}_{season}_{type}"
+      "{lu(group, 'k')}_{lu(field, 'k')}_{lu(season, 'k')}_{lu(type, 'k')}"),
+    description = glue(
+      # deescription: "{group} {field} in {season} for {type}"
+      "{lu(group, 'd')} {lu(field, 'd')} in {lu(season, 'd')} for {lu(type, 'd')}") ) |> 
+  ungroup() |> 
+  relocate(key, group, field, season, type, description)
+
+# Append value_min and value_max columns to d_lyrs per layer key from d_long ----
+d_lyrs <- d_lyrs |> 
+  left_join(
+    d_long |> 
+      group_by(group, field, season, type) |> 
+      summarise(
+        value_min = min(value, na.rm = T),
+        value_max = max(value, na.rm = T),
+        .groups = "drop"),
+    by = join_by(group, type, season, field) )
+write_csv(d_lyrs, lyr_csv)
+```
+
+### Transform to Wide Format
+
+This step pivots the long format data back to a wide format where each layer becomes a column, making it suitable for GIS applications and web visualization.
+
+```{r lyrs_to_wide}
+# Join long data with layer keys and descriptions ----
+d_wide <- d_long |> 
+  left_join(
+    d_lyrs |> 
+      select(key, group, type, season, field), 
+    by = join_by(group, type, season, field)) |>
+  select(fid, key, value) |> 
+  pivot_wider(
+    names_from  = key,
+    values_from = value)
+write_csv(d_wide, wide_csv)
+```
+
+### Combine Data with Geometry
+
+This step merges the transformed attribute data with the spatial geometry to create the final spatial dataset.
+
+```{r wide_to_dataset}
+# combine wide data and fid geometry ----
+d_indicators <- d_wide |> 
+  left_join(
+    d_geom, by = join_by(fid)) |> 
+  relocate(fid) |> 
+  st_as_sf()
+st_geometry(d_indicators) <- "geom"
+# mapview::mapView(d_indicators)
+```
+
+### Store in PostgreSQL/PostGIS Database
+
+This final transformation step writes the processed data to the PostgreSQL database with proper spatial indexing and primary key constraints.
+
+```{r dataset_to_database}
+# write to database ----
+# TODO: Add transaction support for atomic writes
+# TODO: Add validation of successful write before proceeding
+# TODO: Consider adding spatial indexes for better query performance
+schema <- "oceanmetrics"
+tbl    <- "ds_indicators"
+
+if (!dbExistsTable(con, Id(schema = schema, table = tbl))) {
+  d_indicators |> 
+    mutate(id = as.integer(fid)) |> 
+    select(-fid) |> 
+    st_write(con, tbl)
+  
+  # enforce SRID so shows up in tile.marinesensivity.org
+  dbExecute(con, glue(
+    "SELECT UpdateGeometrySRID('{schema}','{tbl}','geom',4326);"))
+  # make id the primary key
+  dbExecute(con, glue(
+    "ALTER TABLE {schema}.{tbl} ADD PRIMARY KEY (id);"))
+  
+  dbWriteTable(con, "ds_indicators_lyrs", d_lyrs, row.names = F, overwrite = T)
+}
+```
+
+## Visualize with `mapgl`
+
+```{r mapgl}
+ply_url     <- "https://api.marinesensitivity.org/tilejson?table=oceanmetrics.ds_indicators"
+key         <- "al_er_su_wr"
+description <- d_lyrs |> 
+  filter(key == !!key) |> 
+  pull(description)
+
+n_cols <- 11
+cols <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
+brks <- seq(0, 1.0, length.out = n_cols)
+
+# mapboxgl(
+#   style      = mapbox_style("dark"),
+maplibre(
+  style      = carto_style("voyager"),
+  projection = "globe") |>
+  fit_bounds(d_geom, animate = F) |> 
+  add_vector_source(
+    id         = "src",
+    url        = ply_url,
+    promoteId  = "id") |>
+  add_fill_layer(
+    id            = "ply",
+    source        = "src",
+    source_layer  = "oceanmetrics.ds_indicators",
+    fill_color    = interpolate(
+      column = key,
+      values = brks,
+      stops  = cols ),
+    fill_opacity  = 0.7,
+    tooltip       = key,
+    popup         = concat(
+      "layer column: ", key, "</pre><br>
+       feature id: ", get_column("id"), "</pre><br>
+       value: ", get_column(key) ),
+    hover_options = list(
+      fill_color   = "cyan",
+      fill_opacity = 1 ) ) |> 
+  add_legend(
+    description,
+    values   = c(0, 1),
+    colors   = cols,
+    position = "bottom-right") |>
+  add_fullscreen_control(
+    position = "top-left") |>
+  add_navigation_control() |>
+  add_scale_control()
+```
+
+## Vector Tile Generation (Archived)
+
+**Note**: This section contains archived code for generating vector tiles. Consider updating to use the database directly for tile generation.
+
+### Background on Vector Tiles
+
+Vector tiles are an efficient way to serve spatial data for web visualization:
+
+- **MBTiles**: SQLite-based format for storing tiled map data
+- **PMTiles**: Cloud-optimized format that can be served directly from S3
+- **Tippecanoe**: Tool for creating vector tiles with intelligent simplification
+
+```{r stop_eval}
+# stop eval for now
+knitr::opts_chunk$set(eval = F)
+```
+
+```{r geo_to_mbtiles}
+# tippecanoe(
+#   glue("'{normalizePath(data_geo)}'"),
+#   basename(data_mbt),
+#   layer_name   = "indicators",
+#   keep_geojson = T)
+# tippecanoe v2.78.0
+# 27841 features, 20167849 bytes of geometry and attributes, 17959145 bytes of string pool, 0 bytes of vertices, 0 bytes of nodes
+# Choosing a maxzoom of -z2 for features typically 37540 feet (11443 meters) apart, and at least 18667 feet (5690 meters) apart
+# Choosing a maxzoom of -z8 for resolution of about 1507 feet (459 meters) within features
+# tile 0/0/0 size is 4854382 with detail 12, >500000    
+# Going to try keeping the sparsest 8.24% of the features to make it fit
+
+# https://github.com/mapbox/tippecanoe?tab=readme-ov-file#continuous-polygon-features-states-and-provinces-visible-at-all-zoom-levels
+#
+# -zg: Automatically choose a maxzoom that should be sufficient to clearly distinguish the features and the detail within each feature
+#
+# --coalesce-densest-as-needed: If the tiles are too big at low or medium zoom levels, merge as many features together as are necessary to allow tiles to be created with those features that are still distinguished
+#
+# --extend-zooms-if-still-dropping: If even the tiles at high zoom levels are too big, keep adding zoom levels until one is reached that can represent all the features
+# system(glue("
+#   tippecanoe -o {basename(data_mbt)}  \\
+#     --maximum-tile-bytes=1000000      \\
+#     --simplification=10               \\
+#     -zg                               \\
+#     --coalesce-densest-as-needed      \\
+#     --extend-zooms-if-still-dropping  \\
+#     --force                           \\
+#     '{normalizePath(data_geo)}' " )
+# )
+
+cmd <- glue("
+  tippecanoe -o {basename(data_mbt)}  \\
+    --maximum-tile-bytes=1000000      \\
+    --simplification=10               \\
+    -zg                               \\
+    --coalesce-densest-as-needed      \\
+    --extend-zooms-if-still-dropping  \\
+    --force                           \\
+    '{normalizePath(data_geo)}' " )
+cat(cmd)
+system(cmd)
+# -zg: Automatically choose a maxzoom that should be sufficient to clearly distinguish the features and the detail within each feature
+
+
+if (file_exists(data_mbt))
+  file_delete(data_mbt)
+file_move(
+  basename(data_mbt),
+  data_mbt)
+```
+
+```{r mbtiles_to_pmtiles}
+if (file_exists(data_pmt))
+  file_delete(data_pmt)
+system(glue("
+  pmtiles convert \\
+    '{normalizePath(data_mbt)}' \\
+    '{normalizePath(data_pmt, mustWork=F)}' " ) )
+# 2025/06/05 16:32:37 convert.go:159: Pass 1: Assembling TileID set
+# 2025/06/05 16:32:37 convert.go:190: Pass 2: writing tiles
+#  100% |██████████████████████████████████████████| (508/508, 1333 it/s)        
+# 2025/06/05 16:32:38 convert.go:244: # of addressed tiles:  508
+# 2025/06/05 16:32:38 convert.go:245: # of tile entries (after RLE):  508
+# 2025/06/05 16:32:38 convert.go:246: # of tile contents:  508
+# 2025/06/05 16:32:38 convert.go:269: Total dir bytes:  1621
+# 2025/06/05 16:32:38 convert.go:270: Average bytes per addressed tile: 3.19
+# 2025/06/05 16:32:38 convert.go:239: Finished in  460.858875ms
+```
+
+```{r pmtiles_to_s3}
+# [setup s3 bucket](https://oceanmetrics.github.io/workflows/explore_geoarrow.html#setup-s3-aws-bucket)
+
+d_aws <- read_csv(
+  '~/My Drive/private/ben_ben@ecoquants.com_console.aws.amazon.com_accessKeys.csv') |> 
+  clean_names()
+Sys.setenv(
+  "AWS_ACCESS_KEY_ID"     = d_aws$access_key_id,
+  "AWS_SECRET_ACCESS_KEY" = d_aws$secret_access_key,
+  "AWS_DEFAULT_REGION"    = "us-east-1")
+bucket <- "oceanmetrics.io-public"
+
+# load/reload aws.s3 to read credentials
+# unloadNamespace("mapboxapi")
+unloadNamespace("aws.s3")
+librarian::shelf(
+  aws.s3,
+  quiet = T)
+# bucketlist()
+
+stopifnot(bucket_exists(bucket))
+
+o      <- basename(data_pmt)
+o_file <- data_pmt
+
+if (!object_exists(o, bucket))
+  put_object(o_file, o, bucket, multipart = T, verbose = F)
+
+# put_acl(o, bucket, acl = "public-read")
+# "The bucket does not allow ACLs"
+
+# check
+o_s3 <- glue("s3://{bucket}/{o}")
+object_exists(o_s3)
+# s3://oceanmetrics.io-public/indicators.pmtiles
+url_s3 <- glue("https://s3.us-east-1.amazonaws.com/{bucket}/{o}")
+```
+
+```{r pmtiles_viewer}
+url_pmview <- glue("https://pmtiles.io/#url={url_s3}")
+browseURL(url_pmview)
+```
+
+## Additional Data Sources
+
+### World Database on Protected Areas (WDPA)
+
+This section demonstrates how to integrate additional protected area data from WDPA, which could be overlaid with the biodiversity indicators.
+
+**TODO**: This section needs to be integrated with the main workflow or moved to a separate document.
+
+```{r}
+# rappdirs::user_data_dir("wdpar")
+
+dir_wdpar <- "~/My Drive/projects/oceanmetrics/data/raw/wdpar"
+
+# download protected area data for Malta
+pa <- wdpa_fetch(
+  "global", wait = TRUE, download_dir = dir_wdpar)
+# Warning message:
+# In CPL_read_ogr(dsn, layer, query, as.character(options), quiet,  :
+#   GDAL Message 1: organizePolygons() received a polygon with more than 100 parts. The processing may be really slow.  You can skip the processing by setting METHOD=SKIP, or only make it analyze counter-clock wise parts by setting METHOD=ONLY_CCW if you can assume that the outline of holes is counter-clock wise defined
+
+# clean protected area data (with procedure for erasing overlaps disabled)
+pa_cl <- wdpa_clean(pa, erase_overlaps = FALSE)
+
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
+
+TODO: add PMTiles from [ProtectedSeas Navigator](https://map.navigatormap.org/):
+
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/eez.pmtiles>
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/12nm.pmtiles>
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp3_fill.pmtiles>
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp4_fill.pmtiles>
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp5_fill.pmtiles>
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp1_boundaries.pmtiles>
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp2_boundaries.pmtiles>
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp3_boundaries.pmtiles>
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp4_boundaries.pmtiles>
+- <https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp5_boundaries.pmtiles>
+
+
+```{r}
+
+
+librarian::shelf(
+  glue, sf)
+
+url <- "https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp3_fill.pmtiles"
+system(glue("pmtiles show '{url}'"))
+lfp3 <- st_read(url)
+
+library(leafem)
+library(leaflet)
+# url = "https://vector-tiles-data.s3.eu-central-1.amazonaws.com/rivers_africa.pmtiles"
+leaflet() %>%
+  addTiles() %>%
+  addPMPolylines(
+    url = url
+    , layerId = "rivers"
+    , group = "rivers"
+    , style = paintRules(
+      layer = "rivers_africa"
+      , color = "blue"
+    )
+  ) %>%
+  setView(24, 2.5, 4)
+
+```
+
+
+<https://pmtiles.io/#url=https%3A%2F%2Fs3.us-west-2.amazonaws.com%2Fpmtiles.navigator.protectedseas%2Flfp3_fill.pmtiles>
+
+```{r}
+pm_viewer <- "https://pmtiles.io/#url=https%3A%2F%2Fs3.us-west-2.amazonaws.com%2Fpmtiles.navigator.protectedseas%2Flfp3_fill.pmtiles"
+URLdecode(pm_viewer)
+"https://pmtiles.io/#url=https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp3_fill.pmtiles"
+
+
+# devtools::install_github("walkerke/mapgl")
+librarian::shelf(
+  mapgl)
+
+# pmtiles <- "https://data.source.coop/cboettig/us-boundaries/mappinginequality.pmtiles"
+# lyr <- "mappinginequality"
+pmtiles <- "https://s3.us-west-2.amazonaws.com/pmtiles.navigator.protectedseas/lfp3_fill.pmtiles"
+lyr <- "lfp3_fill"
+
+pmtiles <- url_s3
+lyr <- "indicators"
+
+
+# lfp3_fill Polygon
+# missing ID
+# id	668
+# lfp	3
+# last_update	2025-04-30
+# region_type	eez
+
+# mappinginequality Polygon
+# missing ID
+# area_id	3549
+# city	New Haven
+# state	CT
+# city_survey	true
+# category	Still Desirable
+# grade	B
+# label	B5
+# residential	true
+# commercial	false
+# industrial	false
+# fill	#7cb5bd
+
+# m <-
+maplibre(center=c(-72.9, 41.3), zoom=10, height="400") |>
+# mapboxgl(center=c(-72.9, 41.3), zoom=10, height="400") |>
+  add_vector_source(
+    "pmtile_source",
+    url = paste0("pmtiles://", pmtiles) ) |>
+  add_fill_layer(
+    id           = "pmtile_layer",
+    source       = "pmtile_source",
+    # source_layer = "mappinginequality",
+    # source_layer = "lfp3_fill",
+    source_layer = "indicators",
+    # tooltip      = "grade",
+    # tooltip      = "id",
+    tooltip      = "FID",
+    # filter       = list(
+    #   "==", 
+    #   list("get", "city"), "New Haven"),
+    # fill_color = list("get", "fill") 
+    fill_color = "#0000FF80")
+
+# m
+```
+
+## TODO Lists and Recommendations
+
+### High Priority Tasks
+
+1. **Error Handling & Validation**
+   - [ ] Add comprehensive error handling for file operations
+   - [ ] Validate shapefile naming patterns before processing
+   - [ ] Add transaction support for database writes
+   - [ ] Implement rollback mechanisms for failed operations
+   - [ ] Add checkpoints to resume processing after failures
+
+2. **Performance Optimization**
+   - [ ] Consider parallel processing for shapefile reading
+   - [ ] Add progress indicators for long-running operations
+   - [ ] Implement chunked processing for large datasets
+   - [ ] Add spatial indexes to database tables
+   - [ ] Optimize tippecanoe parameters for tile generation
+
+3. **Configuration Management**
+   - [ ] Move hardcoded paths to configuration file
+   - [ ] Use environment variables for sensitive data
+   - [ ] Create separate configs for dev/staging/production
+   - [ ] Add configuration validation at startup
+
+### Medium Priority Tasks
+
+4. **Documentation & Logging**
+   - [ ] Add detailed logging throughout the workflow
+   - [ ] Create data dictionary for all fields
+   - [ ] Document expected data formats and constraints
+   - [ ] Add examples of input/output data
+   - [ ] Create troubleshooting guide
+
+5. **Testing & Quality Assurance**
+   - [ ] Add unit tests for key functions
+   - [ ] Create validation scripts for output data
+   - [ ] Implement data quality checks
+   - [ ] Add integration tests for full workflow
+   - [ ] Create sample test datasets
+
+6. **Deployment & Operations**
+   - [ ] Containerize the workflow (Docker/Singularity)
+   - [ ] Create automated deployment scripts
+   - [ ] Add monitoring and alerting
+   - [ ] Implement backup strategies
+   - [ ] Create recovery procedures
+
+### Low Priority Enhancements
+
+7. **Feature Additions**
+   - [ ] Add support for additional file formats (GeoPackage, etc.)
+   - [ ] Implement data versioning
+   - [ ] Add metadata tracking (processing date, source version)
+   - [ ] Create data validation reports
+   - [ ] Add support for incremental updates
+
+8. **User Interface**
+   - [ ] Create web interface for workflow monitoring
+   - [ ] Add visualization of processing status
+   - [ ] Implement notification system
+   - [ ] Create admin dashboard
+
+## Key Questions for Stakeholders
+
+### Data Management
+1. **Update Frequency**: How often will new indicator data be available? Should we implement automated updates?
+2. **Data Retention**: What is the retention policy for historical data? Should we maintain versions?
+3. **Access Control**: Who should have access to raw vs. processed data?
+
+### Technical Architecture
+4. **Scalability**: What is the expected data growth over the next 2-5 years?
+5. **Performance Requirements**: What are acceptable processing times for the full workflow?
+6. **Integration**: What other systems need to consume this data?
+
+### Quality & Validation
+7. **Data Quality**: What validation rules should be enforced on input data?
+8. **Missing Data**: How should we handle missing or incomplete datasets?
+9. **Error Thresholds**: What percentage of errors is acceptable before halting processing?
+
+### Visualization & Access
+10. **Tile Strategy**: Should we pre-generate all zoom levels or use dynamic tiling?
+11. **Data Formats**: Besides PMTiles, what other output formats are needed?
+12. **API Requirements**: Do we need a REST API for programmatic data access?
+
+## Notes on Current Implementation
+
+### Strengths
+- Clear separation of transformation steps
+- Good use of functional programming patterns
+- Efficient data pivoting strategies
+- Proper spatial data handling
+
+### Areas for Improvement
+- Limited error handling throughout
+- No progress indication for long operations
+- Hardcoded configuration values
+- Missing data validation steps
+- No automated testing framework
+
+### Recommendations for Next Steps
+1. Start with implementing error handling and validation
+2. Create a configuration management system
+3. Add comprehensive logging
+4. Develop automated tests
+5. Document all data transformations
