@@ -1,4 +1,32 @@
 
+## 2026-03-27 ∆ pg_tileserv to indicators.pmtiles
+
+Migrate the app `@../apps/indicators/app.R` to using `mapgl::add_pmtiles_source()`:
+
+OLD: https://api.marinesensitivity.org/tilejson?table=oceanmetrics.ds_indicators
+NEW: https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/indicators.pmtiles
+
+⏺ Done. The changes:               
+                                                                            
+  - add_vector_source → add_pmtiles_source with the new S3 PMTiles URL          
+  - promoteId → promote_id (matching the add_pmtiles_source parameter name)
+  - source_layer: "oceanmetrics.ds_indicators" → "indicators" (the layer name   
+  inside the PMTiles archive)   
+
+⏺ The changes look correct. Here's a summary of all changes made:               
+                                                                                
+  1. add_vector_source → add_pmtiles_source with the new S3 PMTiles URL         
+  2. source_layer: "oceanmetrics.ds_indicators" → "indicators" (layer name      
+  inside PMTiles)                                                               
+  3. promote_id: "id" → "FID" (the ID field in the PMTiles)                     
+  4. Field name mapping: The PMTiles uses long field names like   
+  Ind_WeightedRichShape_summer_All_ecrg_rc instead of short keys like           
+  al_er_su_wr. Added lyr_col constructed via                                    
+  glue("Ind_{type}_{season}_{group}_{field}") from layers.csv columns, used for 
+  interpolate(), get_column(), and tooltip/popup formatting                     
+  5. Refactored reactive: get_lyr_key() → get_lyr() returning the full row so   
+  both lyr_key (for display) and lyr_col (for PMTiles field reference) are      
+  available                                                                                  
 
 ## 2025-05-12.B fix 
 

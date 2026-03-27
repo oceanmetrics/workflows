@@ -379,6 +379,9 @@ n_cols <- 11
 cols <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
 brks <- seq(0, 1.0, length.out = n_cols)
 
+# st_bbox(d_geom)
+# -97.86628  11.76369 -43.88875  56.52494
+
 # mapboxgl(
 #   style      = mapbox_style("dark"),
 maplibre(
