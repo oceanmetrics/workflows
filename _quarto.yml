@@ -1,5 +1,10 @@
 project:
   output-dir: _output
+  resources:
+    - libs/diagram.js
+    - libs/diagram.css
+    - libs/svg-pan-zoom.min.js
+    - diagrams/*.svg
 format:
   html:
     toc: true              # md to exclude: {.unnumbered .unlisted}
@@ -9,6 +14,8 @@ format:
     number-depth: 3
     code-fold: show
     code-tools: true
+    lightbox: true         # zoom figures; diagrams use the .cc-diagram viewer instead (.nolightbox)
+    include-in-header: libs/diagram-head.html
 date: now
 date-format: "YYYY-MM-DD HH:mm:ss"
 editor: source

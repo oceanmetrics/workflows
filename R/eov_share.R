@@ -207,13 +207,13 @@ eov_share_sql <- function(
       CREATE OR REPLACE VIEW {p}sp_clip AS
       SELECT s.aphia_id, s.cell_id, s.v AS u
       FROM {p}sp_cell s
-      JOIN (SELECT DISTINCT aphia_id FROM {p}sp_map WHERE NOT has_range) n
-        ON n.aphia_id = s.aphia_id
+      WHERE s.aphia_id IN (SELECT aphia_id FROM {p}sp_map WHERE NOT has_range)
       UNION ALL
       SELECT s.aphia_id, s.cell_id, s.v AS u
       FROM {p}sp_cell s
-      JOIN (SELECT DISTINCT aphia_id, cell_id FROM {rng_tbl}) r
-        ON r.aphia_id = s.aphia_id AND r.cell_id = s.cell_id"),
+      WHERE EXISTS (
+        SELECT 1 FROM {rng_tbl} r
+        WHERE r.aphia_id = s.aphia_id AND r.cell_id = s.cell_id)"),
     sp_total = glue::glue("
       CREATE OR REPLACE TABLE {p}sp_total AS
       SELECT
@@ -342,6 +342,8 @@ cells_to_raster <- function(
   nm <- colnames(val)
   if (is.null(nm)) nm <- paste0("band", seq_len(ncol(val)))
   names(r) <- nm
+  # NA values inside painted cells (EOV not reportable there) become the fill value
+  val[is.na(val)] <- as.numeric(nodata)
   m <- matrix(as.numeric(nodata), nrow = ncol * nrow, ncol = ncol(val))
   m[cell_id, ] <- val
   terra::values(r) <- m
@@ -463,9 +465,8 @@ stac_collection_eov <- function(
       lnk("root",   "../catalog.json", title = "OceanMetrics Atlas"),
       lnk("parent", "../catalog.json", title = "OceanMetrics Atlas"),
       lnk("self",   paste0(base_url, "/collection.json")),
-      lnk("describedby", notebook_url, "text/html",
-          "Rendered notebook: method, code and checks"),
       lnk("describedby", "./README.md", "text/markdown", "Methods, files and credits"),
+      lnk("describedby", notebook_url, "text/html", "Method notebook"),
       lnk("agents",  "./AGENTS.md", "text/markdown", "Agent/LLM usage guide"),
       lnk("preview", "./thumbnail.png", "image/png", "Thumbnail"),
       lnk("license", "https://creativecommons.org/licenses/by-nc/3.0/", "text/html",
@@ -512,7 +513,7 @@ stac_collection_eov <- function(
         "Rees, T., Froese, R. (2019). AquaMaps: Predicted range maps for aquatic species.",
         "www.aquamaps.org, Version 10/2019."),
       `sci:publications` = list(
-        list(doi = "10.1111/j.1365-2699.2009.02233.x", citation = "Ready et al. (2010) Predicting the distributions of marine organisms at the global scale. Ecological Modelling 221:467-478"),
+        list(doi = "10.1016/j.ecolmodel.2009.10.025", citation = "Ready et al. (2010) Predicting the distributions of marine organisms at the global scale. Ecological Modelling 221:467-478"),
         list(doi = "10.1371/journal.pbio.0020383", citation = "Butchart et al. (2004) Measuring global trends in the status of biodiversity: Red List Indices for birds. PLoS Biology 2(12):e383"),
         list(doi = "10.1371/journal.pone.0000140", citation = "Butchart et al. (2007) Improvements to the Red List Index. PLoS ONE 2(1):e140"),
         list(doi = "10.1038/nature11397", citation = "Halpern et al. (2012) An index to assess the health and benefits of the global ocean. Nature 488:615-620"),
@@ -572,11 +573,13 @@ stac_item_eov <- function(
   lab   <- eov_labels()[[eov]]
   mlab  <- c(risk = "Risk-weighted share", share = "Share (unweighted)")[[metric]]
   bands <- function(type, nodata, unit) {
-    lapply(eov_bands(), \(b) list(name = b, data_type = type, nodata = nodata, unit = unit))
+    lapply(eov_bands(), \(b) list(
+      name = b, description = unname(c(eov_labels(), n_eov = "Number of reportable EOVs")[b]),
+      data_type = type, nodata = nodata, unit = unit))
   }
   props <- c(
     list(
-      title          = paste0(lab, ": ", mlab),
+      title          = paste0(lab, " \u00b7 ", mlab),
       datetime       = NULL,
       start_datetime = "2019-10-01T00:00:00Z",
       end_datetime   = "2019-10-01T00:00:00Z",
@@ -593,6 +596,7 @@ stac_item_eov <- function(
   props <- props[!vapply(props, is.null, NA) | names(props) == "datetime"]
   if (absent) {
     props[["atlas:absent"]] <- TRUE
+    props[["atlas:absent_note"]] <- paste0("AquaMaps models no ", tolower(lab))
     props[["description"]]  <- paste0(
       lab, " is absent from this product: AquaMaps models no ", tolower(lab),
       ", so the layer is empty (nodata) by construction.")

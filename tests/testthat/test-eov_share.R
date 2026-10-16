@@ -269,6 +269,9 @@ test_that("cells_to_raster paints values at cell_id and verifies the template", 
   # cell 10 is row 2, column 2 (row-major from the top-left)
   expect_equal(unname(terra::cellFromRowCol(r, 2, 2)), 10)
   expect_equal(unname(terra::values(r)[10, "a"]), 20)
+  # NA inside a painted cell takes the nodata value too
+  rna <- cells_to_raster(c(1L, 2L), cbind(a = c(5, NA)), tpl, nodata = 255, ncol = 8L, nrow = 4L)
+  expect_equal(unname(terra::values(rna)[1:2, "a"]), c(5, 255))
   # plain vector, NA fill
   r1 <- cells_to_raster(c(5L, 6L), c(1, 2), tpl, ncol = 8L, nrow = 4L)
   expect_equal(sum(!is.na(terra::values(r1))), 2)
@@ -319,6 +322,10 @@ test_that("stac collection: sdm, flower and dimension fields", {
   expect_true(all(c("root", "parent", "self", "describedby", "agents", "preview",
                     "license", "related", "via") %in% rel))
   expect_equal(sum(rel == "describedby"), 2)
+  # README first (non-HTML), the rendered notebook second
+  db <- col$links[rel == "describedby"]
+  expect_equal(db[[1]]$href, "./README.md"); expect_equal(db[[1]]$type, "text/markdown")
+  expect_equal(db[[2]]$type, "text/html"); expect_equal(db[[2]]$title, "Method notebook")
   hrefs <- vapply(col$links, `[[`, "", "href")
   expect_true("https://oceanmetrics.io/workflows/aquamaps_eov.html" %in% hrefs)
   expect_true("./README.md" %in% hrefs)
@@ -350,6 +357,16 @@ test_that("stac items: 16 items, band index per EOV, labels and atlas keys", {
   expect_equal(it$assets$cog$type, "image/tiff; application=geotiff; profile=cloud-optimized")
   expect_length(it$assets$cog[["raster:bands"]], 9)
   expect_equal(it$assets$cog[["raster:bands"]][[9]]$name, "n_eov")
+  for (b in it$assets$cog[["raster:bands"]]) {
+    expect_equal(b$data_type, "uint8"); expect_equal(b$nodata, 255L); expect_equal(b$unit, "score")
+    expect_true(nzchar(b$description))
+  }
+  expect_equal(it$assets$cog[["raster:bands"]][[5]]$description, "Marine mammals")
+  expect_equal(it$assets$density[["raster:bands"]][[1]]$nodata, "nan")
+  expect_equal(it$assets$density[["raster:bands"]][[1]]$data_type, "float32")
+  expect_equal(as.numeric(it$bbox), c(-180, -90, 180, 90))
+  expect_equal(it$geometry$type, "Polygon")
+  expect_equal(it$properties$title, "Marine mammals \u00b7 Share (unweighted)")
   expect_equal(it$properties[["atlas:dims"]], list(eov = "marineMammals", metric = "share"))
   expect_equal(it$properties[["atlas:metric"]], "share")
   expect_equal(as.numeric(it$properties[["atlas:value_range"]]), c(0, 100))
@@ -364,6 +381,10 @@ test_that("stac items: 16 items, band index per EOV, labels and atlas keys", {
   ab <- stac_item_eov("seabirds", "risk")
   expect_true(ab$properties[["atlas:absent"]])
   expect_match(ab$properties$description, "AquaMaps models no seabirds")
+  expect_equal(ab$properties[["atlas:absent_note"]], "AquaMaps models no seabirds")
+  expect_equal(stac_item_eov("seagrasses", "share")$properties[["atlas:absent_note"]],
+               "AquaMaps models no seagrasses")
+  expect_equal(as.numeric(ab$properties[["atlas:value_range"]]), c(0, 100))
   expect_null(it$properties[["atlas:absent"]])
   expect_error(stac_item_eov("whales", "risk"))
 })
