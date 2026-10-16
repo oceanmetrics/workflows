@@ -13,3 +13,5 @@ _output/logs/
 .claude/plans_done
 .claude/notes
 .claude/worktrees/
+
+**/*.quarto_ipynb

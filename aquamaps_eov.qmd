@@ -511,7 +511,7 @@ n_report <- tibble(eov = populated,
                    n_cells = colSums(!is.na(dens$share[, populated, drop = F])))
 ```
 
-`r n_cell` cells hold at least one EOV; the populated EOVs are `r paste(populated, collapse = ", ")`.
+`r format(n_cell, big.mark = ",")` cells hold at least one EOV; the populated EOVs are `r paste(populated, collapse = ", ")`.
 
 ## Outputs {#sec-outputs}
 
@@ -616,9 +616,10 @@ write_csv(eov_summary, file.path(dir_out, "eov_summary.csv"))
 # provenance: size, mtime and hash of every input ----
 file_info <- function(path, hash_max = 2e8) {
   fi <- file.info(path)
+  sha <- if (fi$size <= hash_max) file_multihash(path) else NA_character_
   tibble(path = sub(paste0("^", dir_derived, "/"), "", path),
          size = fi$size, mtime = format(fi$mtime, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
-         sha256 = if (fi$size <= hash_max) file_multihash(path) else NA_character_)
+         sha256 = sha)
 }
 am_files_all <- list.files(p$dist_am, full.names = T)
 manifest <- paste(basename(am_map$file), file.size(am_map$file), sep = ":") |> sort()
@@ -727,7 +728,7 @@ g_thumb <- ggplot() +
 ggsave(file.path(dir_out, "thumbnail.png"), g_thumb, width = 6, height = 3, dpi = 100, bg = "white")
 ```
 
-The product has `r n_h3` H3 cells at resolution 5 and `r nrow(taxa)` taxon by EOV rows in the
+The product has `r format(n_h3, big.mark = ",")` H3 cells at resolution 5 and `r nrow(taxa)` taxon by EOV rows in the
 crosswalk.
 
 ## STAC {#sec-stac}
@@ -836,7 +837,7 @@ if (verify_n > 0) {
         got <- terra::extract(r, terra::xyFromCell(tpl, cid))[[1]]
         got[is.na(got)] <- 0
         tibble(mdl_key = row$mdl_key, n_cells = length(cid),
-               n_equal = sum(got == round(val)), n_within1 = sum(abs(got - val) <= 1),
+               n_equal = sum(got == floor(val)), n_within1 = sum(abs(got - val) <= 1),
                max_abs_diff = max(abs(got - val)), error = NA_character_)
       }, error = \(e) tibble(mdl_key = row$mdl_key, n_cells = NA_integer_, n_equal = NA_integer_,
                              n_within1 = NA_integer_, max_abs_diff = NA_real_, error = conditionMessage(e)))
@@ -862,7 +863,8 @@ n_ver_w1 <- sum(verify$n_within1 == verify$n_cells, na.rm = T)
 ```
 
 Of `r n_ver` species checked, `r n_ver_ok` matched the published COG at every sampled cell
-(`r n_ver_w1` within one unit, the Byte rounding of the published surface).
+(`r n_ver_w1` within one unit). The published Byte surface stores the truncated value, `floor(v)`, so
+equality is tested against the floor of the partition value.
 
 ## Upload {#sec-upload}
 
@@ -901,7 +903,8 @@ tx_sum |>
   mutate(EOV = unname(eov_labels()[as.character(eov)])) |>
   select(EOV, `Taxa` = n_taxa, `With range` = n_with_range, `Weighted` = n_weighted,
          `Excluded` = n_excluded, `q99 risk` = q99_risk, `q99 share` = q99_share) |>
-  kable(digits = 5, format.args = list(scientific = F), na = "absent")
+  mutate(across(starts_with("q99"), \(x) ifelse(is.na(x), NA_character_, format(x, digits = 3, scientific = T)))) |>
+  kable(na = "absent")
 ```
 
 ```{r}
@@ -946,7 +949,7 @@ ggplot() +
 #| fig-height: 6
 
 # example cell: most reportable EOVs, then highest composite ----
-ex <- order(-sc$risk$n_eov, -sc$risk$all, cells$cell_id)[1]
+ex <- order(-sc$risk$n_eov, -sc$risk$all, -sc$risk$dens_all, cells$cell_id)[1]
 petals <- tibble(
   eov   = keys,
   label = unname(eov_labels()[keys]),
@@ -956,7 +959,7 @@ petals <- tibble(
 ggplot(petals, aes(label, score, fill = eov)) +
   geom_col(aes(y = 100), fill = NA, color = "grey80", width = 1) +
   geom_col(width = 1, color = "white", na.rm = T) +
-  geom_text(aes(y = 108, label = lab_txt), size = 3, color = "grey30") +
+  geom_text(aes(y = ifelse(is.na(score), 50, 108), label = lab_txt), size = 3, color = "grey30") +
   annotate("text", x = 1, y = -35, size = 9, fontface = "bold", label = sc$risk$all[ex]) +
   coord_polar() +
   scale_y_continuous(limits = c(-35, 115)) +
@@ -973,12 +976,12 @@ and the empty ones are explicit. The atlas draws the same flower from `atlas:flo
 
 ```{r}
 #| label: tbl-top-cells
-#| tbl-cap: "Ten cells with the highest composite risk score (ties: more EOVs, then higher density), with longitude and latitude of the cell centre."
+#| tbl-cap: "Ten cells with the highest composite risk score (ties: more EOVs, then higher summed density), with longitude and latitude of the cell centre."
 
 top <- cells |>
-  mutate(composite = sc$risk$all, n_eov = sc$risk$n_eov) |>
+  mutate(composite = sc$risk$all, n_eov = sc$risk$n_eov, dens_all = sc$risk$dens_all) |>
   bind_cols(as_tibble(sc$risk$eov[, populated, drop = F])) |>
-  arrange(desc(composite), desc(n_eov), cell_id) |>
+  arrange(desc(composite), desc(n_eov), desc(dens_all), cell_id) |>
   slice_head(n = 10) |>
   select(cell_id, lon, lat, composite, n_eov, all_of(populated))
 kable(top, digits = 2, col.names = c("cell_id", "lon", "lat", "composite", "n EOV", populated))
@@ -991,7 +994,7 @@ kable(top, digits = 2, col.names = c("cell_id", "lon", "lat", "composite", "n EO
 dbDisconnect(con, shutdown = T)
 ```
 
-In this run the staging directory `r basename(dir_out)` holds the product for `r n_cell` cells;
+In this run the staging directory `r basename(dir_out)` holds the product for `r format(n_cell, big.mark = ",")` cells;
 the composite risk score reaches `r max(sc$risk$all, na.rm = T)` and the most EOVs reported in
 one cell are `r max(sc$risk$n_eov)`.
 

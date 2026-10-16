@@ -328,7 +328,7 @@ cells_to_raster <- function(
   stopifnot(
     terra::ncol(tpl) == ncol,
     terra::nrow(tpl) == nrow,
-    all(abs(as.vector(terra::ext(tpl)) - ext) < 1e-9))
+    all(abs(as.vector(terra::ext(tpl)) - ext) < 1e-4))   # the tif extent is off by ~6e-6 degrees
   val <- as.matrix(val)
   stopifnot(nrow(val) == length(cell_id), !anyNA(cell_id),
             all(cell_id >= 1L & cell_id <= ncol * nrow))
@@ -338,7 +338,10 @@ cells_to_raster <- function(
   got <- as.vector(terra::values(tpl, mat = F)[chk])
   stopifnot("template[cell_id] != cell_id: not the global05 cell_id raster" =
               identical(as.numeric(got), as.numeric(chk)))
-  r  <- terra::rast(tpl, nlyrs = ncol(val))
+  # exact global05 geometry (the template's own extent differs by ~6e-6 degrees)
+  r  <- terra::rast(
+    nrows = nrow, ncols = ncol, nlyrs = ncol(val), crs = "EPSG:4326",
+    xmin = ext[1], xmax = ext[2], ymin = ext[3], ymax = ext[4])
   nm <- colnames(val)
   if (is.null(nm)) nm <- paste0("band", seq_len(ncol(val)))
   names(r) <- nm
