@@ -683,6 +683,7 @@ eov_weights_table <- function(scheme = c("ohi", "mst_v1")) {
 #' @param updated ISO timestamp
 #' @param base_url public prefix of the product
 #' @param notebook_url rendered notebook (the method and the code)
+#' @param cell_species TRUE adds the `atlas:cell_species` field ([eov_cell_species_field()])
 #' @return list ready for [jsonlite::write_json()] with `auto_unbox = T`
 stac_collection_eov <- function(
     version      = "1.0.0",
@@ -692,7 +693,8 @@ stac_collection_eov <- function(
     q            = 0.99,
     updated      = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
     base_url     = "https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/atlas/aquamaps_eov",
-    notebook_url = "https://oceanmetrics.io/workflows/aquamaps_eov.html") {
+    notebook_url = "https://oceanmetrics.io/workflows/aquamaps_eov.html",
+    cell_species = FALSE) {
   lnk <- function(rel, href, type = "application/json", title = NULL) {
     l <- list(rel = rel, href = href, type = type)
     if (!is.null(title)) l$title <- title
@@ -715,7 +717,7 @@ stac_collection_eov <- function(
           title = "MarineSensitivity v9 IUCN ranges (msens-v9-rng_iucn)"),
       lnk("via", "https://www.aquamaps.org", "text/html", "AquaMaps (producer)")),
     lapply(items, \(id) lnk("item", paste0("./items/", id, ".json"))))
-  c(
+  col <- c(
     list(
       type           = "Collection",
       stac_version   = "1.1.0",
@@ -788,6 +790,43 @@ stac_collection_eov <- function(
       `cube:dimensions` = .eov_dims(),
       assets = assets,
       links  = links))
+  if (isTRUE(cell_species)) col[["atlas:cell_species"]] <- eov_cell_species_field()
+  col
+
+}
+
+#' The `atlas:cell_species` collection field (the atlas hook for the cell -> species table)
+#'
+#' Tells a client where the tiled `cell_id, aphia_id, suit` Parquet files are, how to
+#' find the tile of a cell (5 degree tiles of the global05 grid), the species lookup
+#' asset and the links to show per species.
+#'
+#' @return list, serialised verbatim into the collection
+eov_cell_species_field <- function() {
+  list(
+    asset        = "cell_species",
+    lookup_asset = "species",
+    layout       = "tiles",
+    tile_deg     = 5L,
+    href_template = "./cell_species/tile={tile}/data_0.parquet",
+    grid = list(ncol = 7200L, nrow = 3600L, x0 = -180L, y0 = 90L, res = 0.05),
+    key_column     = "cell_id",
+    species_column = "aphia_id",
+    lookup_key     = "aphia_id",
+    value_column   = "suit",
+    value_unit     = "percent",
+    value_range    = I(c(1L, 100L)),
+    value_label    = "Suitability",
+    group_column    = "eov",
+    group_dimension = "eov",
+    share = list(
+      total_column = "total_suit_area",
+      formula      = "suit/100 * area_km2(lat) / total_suit_area"),
+    links = list(
+      list(label = "Atlas", href_template = "?c=aquamaps_native&sp={sp_key}", same_app = TRUE),
+      list(label = "WoRMS", column = "worms_url"),
+      list(label = "IUCN", column = "iucn_url"),
+      list(label = "AquaMaps", column = "aquamaps_url")))
 }
 
 #' STAC Item of one EOV x metric layer

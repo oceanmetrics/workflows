@@ -6,7 +6,7 @@ Notebooks and scripts for OceanMetrics.io. Rendered pages: https://oceanmetrics.
 
 - `ingest_indicators.qmd`: reads the 36 BioTrack indicator shapefiles, loads them to PostGIS (`oceanmetrics.ds_indicators`) and builds `indicators.pmtiles` for the apps.
 - `explore_geoarrow.qmd`: experiments writing and reading `sf` data as GeoParquet locally and on S3.
-- `aquamaps_eov.qmd`: AquaMaps EOV share. Extinction-risk weighted share of AquaMaps habitat (clipped to IUCN ranges) per Essential Ocean Variable on the 0.05 degree grid; computes the product, writes it as a STAC collection (COGs, Parquet, method and provenance) and, with `EOV_S3=1`, uploads it. The rules are in `R/eov_share.R`, tested by `tests/testthat`.
+- `aquamaps_eov.qmd`: AquaMaps EOV share. Extinction-risk weighted share of AquaMaps habitat (clipped to IUCN ranges) per Essential Ocean Variable on the 0.05 degree grid; computes the product, writes it as a STAC collection (COGs, Parquet, method and provenance) and, with `EOV_S3=1`, uploads it. It also writes a cell to species table (`EOV_CELL_SPECIES`, default on in full runs): 5 degree Parquet tiles of the species present in each 0.05 degree cell, plus a species lookup. The rules are in `R/eov_share.R`, tested by `tests/testthat`.
 
 ## Tests and diagrams
 

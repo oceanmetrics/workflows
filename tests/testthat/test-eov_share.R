@@ -616,3 +616,23 @@ test_that("species lookup: preferred English name, registry sp_key, fallback, li
   expect_equal(d$aquamaps_url[3], "https://www.aquamaps.org/preMap2.php?cache=1&SpecID=Rep-9")
   expect_true(all(c("total_suit_area", "eov", "sp_keys") %in% names(d)))
 })
+
+test_that("stac: atlas:cell_species field only when asked, verbatim contract", {
+  expect_null(stac_collection_eov()[["atlas:cell_species"]])
+  cs <- stac_collection_eov(cell_species = TRUE)[["atlas:cell_species"]]
+  expect_equal(cs$asset, "cell_species"); expect_equal(cs$lookup_asset, "species")
+  expect_equal(cs$layout, "tiles"); expect_equal(cs$tile_deg, 5L)
+  expect_equal(cs$href_template, "./cell_species/tile={tile}/data_0.parquet")
+  expect_equal(cs$grid, list(ncol = 7200L, nrow = 3600L, x0 = -180L, y0 = 90L, res = 0.05))
+  expect_equal(c(cs$key_column, cs$species_column, cs$lookup_key, cs$value_column),
+               c("cell_id", "aphia_id", "aphia_id", "suit"))
+  expect_equal(as.numeric(cs$value_range), c(1, 100))
+  expect_equal(c(cs$group_column, cs$group_dimension), c("eov", "eov"))
+  expect_equal(cs$share$total_column, "total_suit_area")
+  expect_equal(vapply(cs$links, `[[`, "", "label"), c("Atlas", "WoRMS", "IUCN", "AquaMaps"))
+  expect_true(cs$links[[1]]$same_app)
+  f <- tempfile(fileext = ".json"); write_stac_json(stac_collection_eov(cell_species = TRUE), f)
+  js <- jsonlite::read_json(f)
+  expect_equal(js[["atlas:cell_species"]]$value_range, list(1, 100))
+  expect_equal(js[["atlas:flower"]]$composite, "all")      # the other fields survive
+})

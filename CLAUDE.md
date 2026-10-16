@@ -70,6 +70,9 @@ earlier prompts and outcomes for this repo.
   `EOV_REDO=1` recompute checkpoints; `EOV_S3=1` upload with `aws s3 sync --delete` (the only side effect);
   `EOV_BATCH_ROWS=80e6` rows per batch of species (the pass over the AquaMaps rows is batched; each batch writes
   `work_<ver>/partials_*/totals|cell_eov/batch_<id>.parquet`, finished batches are skipped on a re-render, `EOV_REDO=1` deletes them);
+  `EOV_CELL_SPECIES=1|0` the cell -> species table (5 degree Parquet tiles `cell_species/tile=<t>/data_0.parquet` of
+  cell_id, aphia_id, suit, plus `species.parquet`; default on in full mode, off in test mode; stage 1 runs inside the
+  batch loop, stage 2 per band in the `cell_species` chunk, markers/partials in `work_<ver>/cs_partials_*`);
   `EOV_WEIGHTS=ohi|mst_v1`; `EOV_Q=0.99`; `EOV_VERIFY_N=20` COG spot-check against the published
   `aquamaps_native` COGs (0 skips); `BUILD_MEMORY_GB`, `BUILD_THREADS`, `BUILD_TMP_GB` (spill cap, default 100).
 - Every scientific rule is a function in `R/eov_share.R` (seeds, WoRMS subtree CTE, Red List weights, share SQL,

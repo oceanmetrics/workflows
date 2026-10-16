@@ -19,6 +19,12 @@ graph LR
     perb["per batch<br/>rng_b - clip_b - tot_b"]:::step
     part[("partials/totals/batch_N.parquet<br/>partials/cell_eov/batch_N.parquet<br/>both files = batch done")]:::artifact
     ce[("eov_sp_total<br/>eov_cell_eov<br/>share, risk")]:::artifact
+    cs1[("cs_partials/batch_N/band=b<br/>stage 1: cell, species, suit")]:::artifact
+  end
+
+  subgraph csp[Chunks: cell_species and species]
+    cs2["stage 2: per 5 degree band<br/>sort, write 72 tiles<br/>cell_species_check"]:::step
+    lk["species lookup<br/>common name, sp_key, links"]:::step
   end
 
   subgraph agg[Chunk: aggregate]
@@ -29,6 +35,7 @@ graph LR
     cog["score_[risk,share].tif (Byte)<br/>density_[risk,share].tif (Float32)"]:::artifact
     pq["cells/eov=[g]/data.parquet<br/>h3_r5.parquet<br/>eov_taxa.parquet"]:::artifact
     meta["eov_summary.csv<br/>method.json<br/>provenance.json<br/>README.md, AGENTS.md"]:::artifact
+    tiles["cell_species/tile=[t]/data_0.parquet<br/>species.parquet"]:::artifact
     stac["collection.json<br/>items/[eov]_[metric].json (16)"]:::artifact
   end
 
@@ -42,6 +49,9 @@ graph LR
   sdm --> perb
   parts --> perb
   perb --> part --> ce
+  perb -. "EOV_CELL_SPECIES" .-> cs1 --> cs2 --> tiles
+  ce --> lk --> tiles
+  tiles --> stac
   ce --> sc
   sdm --> sc
   tpl --> cog
@@ -53,7 +63,7 @@ graph LR
   ver -.-> stac
   stac --> up --> s3
 
-  flags["EOV_REDO, EOV_TEST_N, EOV_BATCH_ROWS,<br/>EOV_WEIGHTS, EOV_Q, EOV_VERIFY_N, EOV_S3,<br/>MSENS_DERIVED, BUILD_MEMORY_GB, BUILD_THREADS, BUILD_TMP_GB"]:::note
+  flags["EOV_REDO, EOV_TEST_N, EOV_BATCH_ROWS,<br/>EOV_CELL_SPECIES, EOV_WEIGHTS, EOV_Q, EOV_VERIFY_N, EOV_S3,<br/>MSENS_DERIVED, BUILD_MEMORY_GB, BUILD_THREADS, BUILD_TMP_GB"]:::note
   flags ~~~ in
 
   classDef source   fill:#f5f0e6,stroke:#8a8272,color:#182b49
@@ -64,5 +74,6 @@ graph LR
   style in    fill:#fafafa,stroke:#cfd6de
   style taxa  fill:#fafafa,stroke:#cfd6de
   style dist  fill:#fafafa,stroke:#cfd6de
+  style csp   fill:#fafafa,stroke:#cfd6de
   style agg   fill:#fafafa,stroke:#cfd6de
   style out   fill:#fafafa,stroke:#cfd6de

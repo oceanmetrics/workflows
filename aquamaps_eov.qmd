@@ -40,6 +40,8 @@ mem_gb    <- as.integer(Sys.getenv("BUILD_MEMORY_GB", "12"))
 n_threads <- as.integer(Sys.getenv("BUILD_THREADS", "8"))
 tmp_gb    <- as.integer(Sys.getenv("BUILD_TMP_GB", "100"))
 batch_rows <- as.numeric(Sys.getenv("EOV_BATCH_ROWS", "80e6"))
+cs_env    <- Sys.getenv("EOV_CELL_SPECIES", "")                  # the cell -> species table:
+do_cs     <- if (cs_env == "") !is_test else cs_env == "1"      # on in full mode, off in test mode
 stopifnot(scheme %in% c("ohi", "mst_v1"), q_score > 0, q_score <= 1)
 
 seeds     <- eov_seeds()
@@ -136,6 +138,8 @@ outputs <- tribble(
   "cells/eov=<g>/data.parquet",       "Parquet (zstd)",     "cell_id, share, risk, score_share, score_risk per cell, partitioned by EOV",
   "h3_r5.parquet",                    "Parquet (zstd)",     "area-weighted mean scores and densities per H3 cell, resolution 5",
   "eov_taxa.parquet",                 "Parquet (zstd)",     "crosswalk: AphiaID, EOV, models, range, Red List code and source, weight, cells, excluded",
+  "species.parquet",                  "Parquet (zstd)",     "eov_taxa plus common_name, sp_key, sis_taxon_id and the WoRMS, IUCN and AquaMaps links: the lookup of the cell to species table",
+  "cell_species/tile=<t>/data_0.parquet", "Parquet (zstd), 5 degree tiles", "cell_id, aphia_id, suit (1-100) of every species present in a 0.05 degree cell, sorted by cell_id then suit; full runs, or EOV_CELL_SPECIES=1",
   "eov_summary.csv",                  "CSV",                "per EOV and metric: n taxa, n with range, n weighted, q99",
   "method.json, provenance.json",     "JSON",               "every parameter, weights, seeds, input versions, hashes, software versions",
   "README.md, AGENTS.md",             "Markdown",           "human and agent guides, generated from the same R lists as this table",
@@ -251,7 +255,9 @@ The chunks below read the inputs, run the rules of `R/eov_share.R` in DuckDB, wr
 a staging directory and, only when asked, upload it (@fig-pipeline). The long DuckDB pass over the
 AquaMaps rows runs in batches of species (`EOV_BATCH_ROWS`, default 80 million rows per batch); each
 batch writes small partial files (`partials/totals` and `partials/cell_eov`), which are the
-checkpoint: a re-render skips finished batches and `EOV_REDO=1` recomputes them.
+checkpoint: a re-render skips finished batches and `EOV_REDO=1` recomputes them. Full runs also build
+the cell to species table (`EOV_CELL_SPECIES`, @sec-cell-species): the species present in every cell,
+as sorted Parquet tiles with a lookup of names and links, which the atlas reads when a cell is clicked.
 
 ![Pipeline: the chunks of this notebook, the tables and files they make, and the environment flags.](diagrams/eov_pipeline.svg){#fig-pipeline .cc-diagram .nolightbox}
 
@@ -305,11 +311,11 @@ if (redo || !identical(old, prm)) {
 
 tibble(
   setting = c("version", "mode", "weights", "score quantile", "verify species", "upload",
-              "memory", "threads", "rows per batch", "staging dir", "inputs"),
+              "memory", "threads", "rows per batch", "cell to species", "staging dir", "inputs"),
   value   = c(ver, if (is_test) glue("test: first {test_n} species per EOV") else "full run",
               scheme, q_score, verify_n, if (do_s3) "EOV_S3=1" else "off",
               glue("{mem_gb} GB"), n_threads, format(batch_rows, big.mark = ",", scientific = F),
-              dir_out, dir_derived)) |>
+              if (do_cs) "on (EOV_CELL_SPECIES)" else "off", dir_out, dir_derived)) |>
   kable()
 ```
 
@@ -459,6 +465,8 @@ splits a species and never mixes EOVs, and a species above the cap gets a batch 
 takes the maximum over a species' models, clips to the footprint, and writes two small partial files:
 the species totals $\sum_c u_{s,c}A_c$ and the per cell and EOV `share` and `risk`. A batch whose two
 partial files exist is skipped, which makes the run restartable (`EOV_REDO=1` deletes the partials).
+When the cell to species table is on (`EOV_CELL_SPECIES`, @sec-cell-species), the same pass also writes
+its stage-1 partials from the batch's clipped distribution, so the AquaMaps rows are not read twice.
 `eov_merge_sql()` then sums the partials into `eov_sp_total` and `eov_cell_eov`. Memory and disk
 use are bounded by the batch size, not by the number of species or the size of the ranges.
 
@@ -480,25 +488,39 @@ kable(tibble(
 #| label: distributions
 
 # partial files are valid only for the parameters that made them ----
-dir_part <- file.path(dir_work, glue("partials_{scheme}_n{test_n}_b{format(batch_rows, scientific = F)}"))
-if (redo) unlink(dir_part, recursive = T)
+key_n    <- glue("n{test_n}_b{format(batch_rows, scientific = F)}")
+dir_part <- file.path(dir_work, glue("partials_{scheme}_{key_n}"))
+dir_cs   <- file.path(dir_work, glue("cs_partials_{key_n}"))        # cell -> species, stage 1
+dir_tile <- file.path(dir_out, "cell_species")                      # cell -> species, stage 2
+f_cs_fin <- file.path(dir_work, glue("cell_species_{key_n}.done"))  # both stages finished
+if (redo) unlink(c(dir_part, dir_cs, dir_tile, f_cs_fin), recursive = T)
 for (d in file.path(dir_part, c("totals", "cell_eov"))) dir.create(d, showWarnings = F, recursive = T)
+if (do_cs && !file.exists(f_cs_fin)) {
+  if (!dir.exists(dir_cs)) unlink(dir_tile, recursive = T)           # tiles of other parameters
+  dir.create(dir_cs, showWarnings = F, recursive = T)
+}
 f_log <- file.path(dir_work, "batch_log.csv")
 
-# one pass over the batches; a batch with both partial files is done ----
+# one pass over the batches: the share partials and, when asked, the stage-1 cell -> species partials ----
 blog <- list()
 t_all <- Sys.time()
 for (i in seq_len(nrow(batches))) {
   b   <- batches[i, ]
   fs  <- file.path(dir_part, c("totals", "cell_eov"), sprintf("batch_%05d.parquet", b$batch_id))
-  if (all(file.exists(fs))) { blog[[i]] <- tibble(batch_id = b$batch_id, seconds = NA_real_); next }
+  f1  <- file.path(dir_cs, sprintf("batch_%05d.done", b$batch_id))
+  need_share <- !all(file.exists(fs))
+  need_cs    <- do_cs && !file.exists(f_cs_fin) && !file.exists(f1)
+  if (!need_share && !need_cs) { blog[[i]] <- tibble(batch_id = b$batch_id, seconds = NA_real_); next }
+  if (need_cs) unlink(file.path(dir_cs, sprintf("batch_%05d", b$batch_id)), recursive = T)
   t0  <- Sys.time()
   st  <- eov_batch_sql(
     batch_id = b$batch_id, am_files = b$am_files[[1]], rng_files = b$rng_files[[1]],
     has_multi = b$has_multi, map_tbl = "eov_am_map", area_tbl = "eov_cell",
     weight_tbl = "eov_weight", eov_tbl = "eov_member", dir_partials = dir_part,
-    rng_map_tbl = "eov_rng_map", eov = b$eov)
+    rng_map_tbl = "eov_rng_map", eov = b$eov, share = need_share,
+    dir_cs = if (need_cs) dir_cs else NULL)
   for (s_ in st) run(s_)
+  if (need_cs) file.create(f1)
   blog[[i]] <- tibble(batch_id = b$batch_id, seconds = as.numeric(difftime(Sys.time(), t0, units = "secs")))
   if (i %% 10 == 0 || i == nrow(batches)) {
     cat(glue("batch {i}/{nrow(batches)}: {round(blog[[i]]$seconds, 1)} s, ",
@@ -780,6 +802,10 @@ agents <- glue("
 - `atlas:flower` = dimension eov, composite all: petals are the sibling items across `eov` for one
   metric, the centre is `all`. Seabirds and seagrasses items are empty (`atlas:absent`).
 - Cells: `cells/eov=<g>/data.parquet` (cell_id is the global05 row-major 1-based cell number).
+- Species in a cell (full runs): collection field `atlas:cell_species`; tile of a cell =
+  `(row div 100) * 72 + col div 100`, row = (cell_id-1) div 7200, col = (cell_id-1) mod 7200; file
+  `cell_species/tile=<t>/data_0.parquet` (cell_id, aphia_id, suit 1-100; sorted by cell_id, one row
+  group per few cells); join `species.parquet` on aphia_id for names, total_suit_area and links.
   AphiaID crosswalk: `eov_taxa.parquet`. Parameters and hashes: `method.json`, `provenance.json`.
 - Non-commercial use only (CC BY-NC 3.0); cite AquaMaps (Kaschner et al. 2019).
 ")
@@ -797,6 +823,126 @@ ggsave(file.path(dir_out, "thumbnail.png"), g_thumb, width = 6, height = 3, dpi 
 
 The product has `r format(n_h3, big.mark = ",")` H3 cells at resolution 5 and `r nrow(taxa)` taxon by EOV rows in the
 crosswalk.
+
+## Cell to species {#sec-cell-species}
+
+For a clicked cell the atlas lists the species present, their suitability and extinction risk, in the
+way the `obis-hex` cell pane does. The rows are the (species, cell) pairs of the product, that is the
+clipped distribution $u_{s,c}>0$ at the 0.05° cells of the map (about `r format(6347722747, big.mark = ",")`
+rows in the full product, too many for one file), stored as Parquet tiles of 5° (at most 10,000
+cells each) with columns `cell_id`, `aphia_id` and `suit` = $\mathrm{round}(v_{s,c})$, sorted by
+`cell_id` and then `suit` descending, in row groups of 32,768 rows. The column statistics of the
+sorted `cell_id` let a reader fetch one row group for one cell. The tile of a cell is
+`(row div 100) * 72 + col div 100` with `row = (cell_id - 1) div 7200` and `col = (cell_id - 1) mod 7200`
+(`cell_of_lonlat()` and `tile_of_cell()` in `R/eov_share.R`).
+
+Stage 1 (inside the batch loop above) writes each batch's rows partitioned by 5° row band; stage 2
+loads one band at a time, writes its tiles sorted, and every tile is checked
+(`cell_species_check()`: the `cell_id` statistics of its row groups must be sorted and
+non-overlapping, otherwise the render stops). Tiles without rows are absent. The stage-1 partials are
+deleted at the end; each batch, band and tile is a checkpoint (`EOV_REDO=1` clears them).
+
+```{r}
+#| label: cell_species
+
+cs_info <- NULL
+if (do_cs) {
+  if (!file.exists(f_cs_fin)) {
+    run("SET preserve_insertion_order = true")        # the tiles must keep their ORDER BY
+    for (band in 0:35) {
+      f_band <- file.path(dir_cs, sprintf("band_%02d.done", band))
+      if (file.exists(f_band)) next
+      if (length(Sys.glob(file.path(dir_cs, "batch_*", paste0("band=", band), "*.parquet"))) > 0) {
+        st <- cell_species_stage2_sql(band, dir_cs, dir_tile)
+        run(st$load)
+        for (cc in dbGetQuery(con, st$cols)$c) {
+          t <- band * 72L + cc
+          if (file.exists(cell_species_tile_path(dir_tile, t))) next
+          dir.create(dirname(cell_species_tile_path(dir_tile, t)), recursive = T, showWarnings = F)
+          run(st$tile(cc))
+          cell_species_commit(dir_tile, t)
+        }
+        run(st$drop)
+      }
+      file.create(f_band)
+      cat(glue("cell_species band {band}/35 done\n"), file = stderr())
+    }
+    run("SET preserve_insertion_order = false")
+  }
+  tile_files <- list.files(dir_tile, pattern = "data_0.parquet$", recursive = T, full.names = T)
+  for (f_ in tile_files) cell_species_check(f_, con)
+  tf <- paste0("'", tile_files, "'", collapse = ", ")
+  tile_rows <- dbGetQuery(con, glue("
+    SELECT file_name AS file, sum(num_rows)::DOUBLE AS n
+    FROM parquet_file_metadata([{tf}]) GROUP BY 1"))
+  cs_info <- tibble(
+    n_tiles = length(tile_files), rows = sum(tile_rows$n), bytes = sum(file.size(tile_files)),
+    max_rows = max(tile_rows$n), max_bytes = max(file.size(tile_files)))
+  # every species-cell pair of the product is in exactly one tile row
+  n_expect <- dbGetQuery(con, "SELECT sum(n_cells)::DOUBLE AS n FROM eov_sp_total WHERE NOT excluded")$n
+  stopifnot("cell_species rows != sum of species n_cells" = cs_info$rows == n_expect)
+  if (!file.exists(f_cs_fin)) { file.create(f_cs_fin); unlink(dir_cs, recursive = T) }
+  tile_manifest <- digest::digest(
+    paste(sub(paste0("^", dir_tile, "/"), "", tile_files), file.size(tile_files), sep = ":", collapse = "\n"),
+    algo = "sha256", serialize = F)
+  kable(cs_info |> mutate(across(c(rows, bytes, max_rows, max_bytes), \(x) format(x, big.mark = ",", scientific = F))),
+        caption = "Cell to species tiles written (see also the Results table).")
+} else {
+  cat("cell to species table skipped (test mode without EOV_CELL_SPECIES=1)\n")
+}
+```
+
+The lookup `species.parquet` is `eov_taxa.parquet` plus the columns a client needs to show a species:
+the English common name (WoRMS, preferred name first), the AquaMaps `sp_key` (the one of the
+`aquamaps_native` registry for the AphiaID, else the first of the models' keys), the IUCN
+`sis_taxon_id` and page, and the WoRMS and AquaMaps pages.
+
+```{r}
+#| label: species
+
+# the AquaMaps page pattern: one HEAD request with a real sp_key ----
+sp_probe <- dbGetQuery(con, "SELECT split_part(sp_keys, ';', 1) AS k FROM eov_taxa WHERE sp_keys IS NOT NULL LIMIT 1")$k
+am_tpl   <- "https://www.aquamaps.org/preMap2.php?cache=1&SpecID={sp_key}"
+am_code  <- tryCatch(
+  system2("curl", c("-sIL", "-o", "/dev/null", "-w", shQuote("%{http_code}"), "--max-time", "20",
+                    shQuote(sub("\\{sp_key\\}", sp_probe, am_tpl))), stdout = T),
+  error = \(e) NA_character_)
+if (!identical(am_code, "200")) am_tpl <- "https://www.aquamaps.org/"       # no species page: the home page
+
+# registry of aquamaps_native (aphia_id -> sp_key); empty when offline ----
+reg_rel <- glue("read_parquet('{url_pub}/atlas/aquamaps_native/registry.parquet')")
+reg_ok  <- tryCatch({
+  invisible(run("INSTALL httpfs")); invisible(run("LOAD httpfs"))
+  dbGetQuery(con, glue("SELECT count(*) AS n FROM {reg_rel}"))$n > 0
+}, error = \(e) FALSE)
+if (!reg_ok) reg_rel <- "(SELECT NULL::BIGINT AS aphia_id, NULL::VARCHAR AS sp_key WHERE false)"
+
+f_species <- file.path(dir_out, "species.parquet")
+run(glue("COPY ({species_lookup_sql('eov_taxa', 'spp.worms_vernacular', reg_rel, 'spp.iucn_redlist', am_tpl)})
+          TO '{f_species}' (FORMAT parquet, COMPRESSION zstd)"))
+species <- dbGetQuery(con, glue("SELECT * FROM read_parquet('{f_species}')"))
+kable(tibble(
+  rows = nrow(species), `with common name` = sum(!is.na(species$common_name)),
+  `with sp_key` = sum(!is.na(species$sp_key)), `with IUCN page` = sum(!is.na(species$iucn_url)),
+  `AquaMaps page check` = if (identical(am_code, "200")) "HEAD 200, species page pattern" else glue("HEAD {am_code}: home page"),
+  `registry` = if (reg_ok) "aquamaps_native" else "offline: sp_keys only"),
+  caption = "Species lookup (species.parquet).")
+
+# record the cell -> species table in method.json and provenance.json ----
+if (do_cs) {
+  cs_meta <- list(
+    layout = "tiles of 5 degrees, tile = (row div 100) * 72 + col div 100, row-major global05 cell_id",
+    columns = c("cell_id INTEGER", "aphia_id INTEGER", "suit UTINYINT"),
+    suit = "round(max over the species' models of v), 1..100; cells outside the IUCN range are absent",
+    sort = "cell_id, suit DESC, aphia_id", row_group_size = 32768L, compression = "zstd",
+    n_tiles = cs_info$n_tiles, rows = cs_info$rows, bytes = cs_info$bytes,
+    manifest_sha256 = tile_manifest, species_asset = "species.parquet")
+  method$cell_species <- cs_meta
+  prov$cell_species   <- cs_meta
+  write_json(method, file.path(dir_out, "method.json"), auto_unbox = T, pretty = T, digits = NA, null = "null", na = "null")
+  write_json(prov, file.path(dir_out, "provenance.json"), auto_unbox = T, pretty = T, digits = NA, null = "null")
+}
+```
 
 ## STAC {#sec-stac}
 
@@ -827,6 +973,10 @@ assets <- list(
     href = "./cells/", type = pq_type, roles = I("data"),
     title = "Per-cell share, risk and scores, partitioned by EOV (cells/eov=<g>/data.parquet)",
     `atlas:partitioned_by` = "eov", `atlas:partitions` = cells_parts),
+  species = stac_asset_file(f("species.parquet"), "./species.parquet", pq_type,
+    "Species lookup: eov_taxa plus common name, sp_key, IUCN id and the WoRMS, IUCN and AquaMaps links", "metadata",
+    list(`table:row_count` = nrow(species),
+         `table:columns` = lapply(names(species), \(n) list(name = n)))),
   h3_r5 = stac_asset_file(f("h3_r5.parquet"), "./h3_r5.parquet", pq_type,
     "H3 resolution 5: area-weighted mean scores and densities", "data",
     list(`sdm:h3_resolution` = 5L, `table:row_count` = n_h3)),
@@ -840,6 +990,18 @@ assets <- list(
     "Share score 0-100, 9 bands", "data"),
   thumbnail = stac_asset_file(f("thumbnail.png"), "./thumbnail.png", "image/png",
     "Thumbnail: composite risk score", "thumbnail"))
+
+# the cell -> species tiles are one asset (a directory of files) ----
+if (do_cs) {
+  assets$cell_species <- list(
+    href = "./cell_species/", type = pq_type, roles = I("metadata"),
+    title = "Species present per 0.05 degree cell: cell_id, aphia_id, suit; 5 degree tiles cell_species/tile=<t>/data_0.parquet",
+    `atlas:n_tiles` = cs_info$n_tiles, `table:row_count` = cs_info$rows,
+    `file:size` = cs_info$bytes,
+    `table:columns` = list(
+      list(name = "cell_id", type = "int32"), list(name = "aphia_id", type = "int32"),
+      list(name = "suit", type = "uint8", description = "suitability 1-100 = round(max v)")))
+}
 
 # items: 8 EOV values x 2 metrics ----
 grid <- expand.grid(eov = eov_levels(), metric = c("risk", "share"), stringsAsFactors = F) |> as_tibble()
@@ -857,14 +1019,15 @@ for (i in seq_len(nrow(grid))) {
 }
 
 # collection ----
-col <- stac_collection_eov(version = ver, assets = assets, items = item_ids, scheme = scheme, q = q_score)
+col <- stac_collection_eov(version = ver, assets = assets, items = item_ids, scheme = scheme,
+                           q = q_score, cell_species = do_cs)
 write_stac_json(col, f("collection.json"))
 
 n_items <- length(list.files(f("items"), pattern = "json$"))
 files_out <- tibble(file = list.files(dir_out, recursive = T)) |>
   mutate(MB = file.size(file.path(dir_out, file)) / 1e6) |>
-  filter(!startsWith(file, "items/"))
-kable(files_out, digits = 2, caption = "Staged files (items/ omitted).")
+  filter(!startsWith(file, "items/"), !startsWith(file, "cell_species/"))
+kable(files_out, digits = 2, caption = "Staged files (items/ and the cell_species/ tiles omitted; see the Results table for the tiles).")
 ```
 
 The collection has `r n_items` items and `r nrow(files_out)` other staged files totalling
@@ -1055,6 +1218,59 @@ kable(top, digits = 2, col.names = c("cell_id", "lon", "lat", "composite", "n EO
 ```
 
 ```{r}
+#| label: tbl-cell-species
+#| tbl-cap: "Top 15 species of the example cell of the flower plot, read from its cell_species tile: EOV, suitability (percent), share of the species' global habitat that lies in the cell (percent) and Red List category."
+
+if (do_cs) {
+  cell_ex <- cells$cell_id[ex]
+  cs_cell <- dbGetQuery(con, glue("
+    SELECT c.aphia_id, c.suit, s.scientific_name, s.common_name, s.eov, s.redlist_code, s.total_suit_area
+    FROM read_parquet('{cell_species_tile_path(dir_tile, tile_of_cell(cell_ex))}') c
+    JOIN read_parquet('{f_species}') s ON s.aphia_id = c.aphia_id
+    WHERE c.cell_id = {cell_ex}")) |>
+    mutate(share_pct = 100 * suit * cells$area_km2[ex] / total_suit_area) |>
+    arrange(desc(suit), desc(share_pct), scientific_name)
+  cs_cell |>
+    slice_head(n = 15) |>
+    mutate(species = ifelse(is.na(common_name), scientific_name, paste0(scientific_name, " (", common_name, ")")),
+           eov = unname(eov_labels()[eov])) |>
+    select(Species = species, EOV = eov, `Suitability` = suit, `Share %` = share_pct, `Red List` = redlist_code) |>
+    kable(digits = 4, na = "")
+} else {
+  cat("cell to species table not built in this run\n")
+}
+```
+
+```{r}
+#| label: tbl-cell-species-size
+#| tbl-cap: "Size of the cell to species table: number of tiles, rows and bytes in total, and the largest tile."
+
+if (do_cs) {
+  fmt <- \(x) format(x, big.mark = ",", scientific = F)
+  kable(tibble(
+    `Tiles` = fmt(cs_info$n_tiles), `Rows` = fmt(cs_info$rows),
+    `Bytes` = fmt(cs_info$bytes), `GB` = round(cs_info$bytes / 1e9, 2),
+    `Largest tile rows` = fmt(cs_info$max_rows), `Largest tile bytes` = fmt(cs_info$max_bytes)))
+} else {
+  cat("cell to species table not built in this run\n")
+}
+```
+
+```{r}
+#| label: cs-check
+#| include: false
+
+# the share of a species in the cell from its tile row: suit * area / total_suit_area
+# (the totals were summed with v on the 1-100 scale); the sum per EOV matches the product's own share
+if (do_cs) {
+  chk <- cs_cell |>
+    group_by(eov) |> summarize(from_tiles = sum(share_pct) / 100, .groups = "drop") |>
+    left_join(dbGetQuery(con, glue("SELECT eov, share AS product FROM eov_cell_eov WHERE cell_id = {cell_ex}")), by = "eov") |>
+    mutate(ratio = from_tiles / product)
+}
+```
+
+```{r}
 #| label: close
 #| include: false
 
@@ -1064,6 +1280,7 @@ dbDisconnect(con, shutdown = T)
 In this run the staging directory `r basename(dir_out)` holds the product for `r format(n_cell, big.mark = ",")` cells;
 the composite risk score reaches `r max(sc$risk$all, na.rm = T)` and the most EOVs reported in
 one cell are `r max(sc$risk$n_eov)`.
+`r if (do_cs) paste0("For the example cell, the per-EOV sums of the species shares computed from the tiles (suit x area / total) are within ", round(100 * max(abs(chk$ratio - 1)), 1), " percent of the product share (rounding of suit to an integer).")`
 
 # Reproducibility and use {#sec-use}
 
@@ -1080,7 +1297,7 @@ EOV_S3=1 quarto render aquamaps_eov.qmd               # also upload (the only si
 ```
 
 Flags: `EOV_REDO`, `EOV_S3`, `EOV_TEST_N`, `EOV_WEIGHTS` (`ohi` or `mst_v1`), `EOV_Q` (score
-quantile), `EOV_BATCH_ROWS` (rows per batch), `EOV_VERIFY_N` (COG spot-check, 0 to skip), `MSENS_DERIVED`, `BUILD_MEMORY_GB`,
+quantile), `EOV_BATCH_ROWS` (rows per batch), `EOV_CELL_SPECIES` (the cell to species table: on in full runs, `1` forces it in a test run, `0` skips it), `EOV_VERIFY_N` (COG spot-check, 0 to skip), `MSENS_DERIVED`, `BUILD_MEMORY_GB`,
 `BUILD_THREADS`, `BUILD_TMP_GB` (cap on DuckDB spill files, default 100). The rules live in `R/eov_share.R` and are guarded by `tests/testthat`
 (`Rscript -e 'testthat::test_dir("tests/testthat")'`).
 
@@ -1108,6 +1325,47 @@ DBI::dbGetQuery(con, glue::glue(
 DBI::dbGetQuery(con, glue::glue(
   "SELECT eov, count(*) n FROM read_parquet('{base}/eov_taxa.parquet') GROUP BY 1"))
 ```
+
+**Species in one cell** (full runs only; not run here). The tile of a cell follows from its grid
+position, so one small file and, thanks to the sorted `cell_id` statistics, one row group is read:
+
+```{r}
+#| label: use-cell-r
+#| eval: false
+
+librarian::shelf(duckdb, glue, quiet = T)
+base <- "https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/atlas/aquamaps_eov"
+
+# the cell and tile of a point (global05: 7200 x 3600 cells of 0.05 degree, row-major from the top-left)
+lon <- -86.73; lat <- 21.62
+col  <- floor((lon + 180) / 0.05); row <- floor((90 - lat) / 0.05)
+cell <- row * 7200 + col + 1                      # 9844266
+tile <- (row %/% 100) * 72 + col %/% 100          # 954
+
+con <- dbConnect(duckdb())
+dbExecute(con, "INSTALL httpfs; LOAD httpfs")
+dbGetQuery(con, glue(
+  "SELECT s.scientific_name, s.common_name, s.eov, c.suit, s.redlist_code, s.aquamaps_url
+   FROM read_parquet('{base}/cell_species/tile={tile}/data_0.parquet') c
+   JOIN read_parquet('{base}/species.parquet') s USING (aphia_id)
+   WHERE c.cell_id = {cell}
+   ORDER BY c.suit DESC LIMIT 15"))
+```
+
+The same query in the DuckDB shell:
+
+```sql
+INSTALL httpfs; LOAD httpfs;
+SELECT s.scientific_name, s.eov, c.suit, s.redlist_code
+FROM read_parquet('https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/atlas/aquamaps_eov/cell_species/tile=954/data_0.parquet') c
+JOIN read_parquet('https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/atlas/aquamaps_eov/species.parquet') s USING (aphia_id)
+WHERE c.cell_id = 9844266
+ORDER BY c.suit DESC LIMIT 15;
+```
+
+The share of a species' global habitat that lies in the cell is `suit * area_km2 / total_suit_area`
+(`total_suit_area` is in `species.parquet`; the totals were summed with the suitability on the 1-100
+scale, and `suit` is the rounded value).
 
 **Read the product from Python** (not run here):
 
