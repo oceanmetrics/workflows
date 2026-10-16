@@ -38,6 +38,7 @@ q_score   <- as.numeric(Sys.getenv("EOV_Q", "0.99"))
 verify_n  <- as.integer(Sys.getenv("EOV_VERIFY_N", "20"))
 mem_gb    <- as.integer(Sys.getenv("BUILD_MEMORY_GB", "12"))
 n_threads <- as.integer(Sys.getenv("BUILD_THREADS", "8"))
+tmp_gb    <- as.integer(Sys.getenv("BUILD_TMP_GB", "100"))
 stopifnot(scheme %in% c("ohi", "mst_v1"), q_score > 0, q_score <= 1)
 
 seeds     <- eov_seeds()
@@ -280,6 +281,7 @@ invisible(run(glue("SET memory_limit = '{mem_gb}GB'")))
 invisible(run(glue("SET threads = {n_threads}")))
 invisible(run(glue("SET temp_directory = '{file.path(dir_work, 'tmp')}'")))
 invisible(run("SET preserve_insertion_order = false"))
+invisible(run(glue("SET max_temp_directory_size = '{tmp_gb}GB'")))   # a runaway spill must not fill the disk
 invisible(run(glue("ATTACH '{p$spp_db}' AS spp (READ_ONLY)")))
 invisible(run(glue("ATTACH '{p$sdm_db}' AS sdm (READ_ONLY)")))
 
@@ -1014,7 +1016,7 @@ EOV_S3=1 quarto render aquamaps_eov.qmd               # also upload (the only si
 
 Flags: `EOV_REDO`, `EOV_S3`, `EOV_TEST_N`, `EOV_WEIGHTS` (`ohi` or `mst_v1`), `EOV_Q` (score
 quantile), `EOV_VERIFY_N` (COG spot-check, 0 to skip), `MSENS_DERIVED`, `BUILD_MEMORY_GB`,
-`BUILD_THREADS`. The rules live in `R/eov_share.R` and are guarded by `tests/testthat`
+`BUILD_THREADS`, `BUILD_TMP_GB` (cap on DuckDB spill files, default 100). The rules live in `R/eov_share.R` and are guarded by `tests/testthat`
 (`Rscript -e 'testthat::test_dir("tests/testthat")'`).
 
 **Read the product from R** (not run here):
