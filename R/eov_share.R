@@ -215,7 +215,7 @@ eov_make_batches <- function(species, max_rows = 80e6) {
 eov_batch_sql <- function(
     batch_id, am_files, rng_files = character(), has_multi = FALSE,
     map_tbl, area_tbl, weight_tbl, eov_tbl, dir_partials,
-    rng_map_tbl = "rng_map", eov = NULL) {
+    rng_map_tbl = "rng_map", eov = NULL, share = TRUE, dir_cs = NULL) {
   id    <- sprintf("%05d", as.integer(batch_id))
   f_tot <- file.path(dir_partials, "totals",   paste0("batch_", id, ".parquet"))
   f_cel <- file.path(dir_partials, "cell_eov", paste0("batch_", id, ".parquet"))
@@ -242,21 +242,22 @@ eov_batch_sql <- function(
     "CREATE OR REPLACE TEMP TABLE rng_b (aphia_id BIGINT, cell_id INTEGER)"
   }
   only_eov <- if (is.null(eov)) "" else glue::glue("AND e.eov = '{eov}'")
-  list(
+  st <- list(
     rng_b = rng_b,
     clip_b = glue::glue("
       CREATE OR REPLACE TEMP TABLE clip_b AS
-      SELECT s.aphia_id, s.cell_id, s.v * a.area_km2 AS ua
+      SELECT s.aphia_id, s.cell_id, s.v, s.v * a.area_km2 AS ua
       FROM ({sp_rows}) s
       JOIN {area_tbl} a ON a.cell_id = s.cell_id
       JOIN (SELECT DISTINCT aphia_id, has_range FROM {map_tbl}) m ON m.aphia_id = s.aphia_id
       LEFT JOIN rng_b r ON r.aphia_id = s.aphia_id AND r.cell_id = s.cell_id
-      WHERE NOT m.has_range OR r.cell_id IS NOT NULL"),
-    tot_b = "
+      WHERE NOT m.has_range OR r.cell_id IS NOT NULL"))
+  if (share) {
+    st$tot_b <- "
       CREATE OR REPLACE TEMP TABLE tot_b AS
       SELECT aphia_id, count(*)::BIGINT AS n_cells, sum(ua) AS total_suit_area
-      FROM clip_b GROUP BY aphia_id",
-    cell_eov = glue::glue("
+      FROM clip_b GROUP BY aphia_id"
+    st$cell_eov <- glue::glue("
       COPY (
         SELECT c.cell_id, e.eov,
                sum(c.ua / t.total_suit_area)                        AS share,
@@ -267,9 +268,14 @@ eov_batch_sql <- function(
         LEFT JOIN {weight_tbl} w ON w.aphia_id = c.aphia_id
         WHERE t.total_suit_area > 0 {only_eov}
         GROUP BY c.cell_id, e.eov)
-      TO '{f_cel}' (FORMAT parquet, COMPRESSION zstd)"),
-    totals = glue::glue("COPY tot_b TO '{f_tot}' (FORMAT parquet, COMPRESSION zstd)"),
-    drop = "DROP TABLE IF EXISTS clip_b; DROP TABLE IF EXISTS tot_b; DROP TABLE IF EXISTS rng_b")
+      TO '{f_cel}' (FORMAT parquet, COMPRESSION zstd)")
+  }
+  if (!is.null(dir_cs)) st$cell_species <- cell_species_stage1_sql(batch_id, dir_cs, "clip_b")
+  if (share) {
+    st$totals <- glue::glue("COPY tot_b TO '{f_tot}' (FORMAT parquet, COMPRESSION zstd)")
+  }
+  st$drop <- "DROP TABLE IF EXISTS clip_b; DROP TABLE IF EXISTS tot_b; DROP TABLE IF EXISTS rng_b"
+  st
 }
 
 #' SQL: merge the partial files of all batches
@@ -301,6 +307,183 @@ eov_merge_sql <- function(dir_partials, map_tbl, out_prefix = "eov_") {
       SELECT cell_id, eov, sum(share) AS share, sum(risk) AS risk
       FROM read_parquet('{dir_partials}/cell_eov/*.parquet')
       GROUP BY cell_id, eov"))
+}
+
+# cell -> species table ----
+
+#' global05 grid math: cell_id <-> lon/lat <-> 5 degree tile
+#'
+#' cell_id is row-major from the top-left, 1-based: `row = (cell_id-1) div 7200`,
+#' `col = (cell_id-1) mod 7200`; cell centres `lon = -180 + (col + 0.5) 0.05`,
+#' `lat = 90 - (row + 0.5) 0.05`; a 5 degree tile is `(row div 100) * 72 + col div 100`
+#' (0..2591), at most 100 x 100 = 10,000 cells.
+#'
+#' @param lon,lat degrees (vectors); points on the outer edge fall in the last cell
+#' @param cell_id integer cell ids
+#' @param ncol,nrow,res grid size and resolution (degrees)
+#' @return `cell_of_lonlat`: integer cell ids; `lonlat_of_cell`: data.frame lon, lat of
+#'   the cell centres; `tile_of_cell`: integer tile ids
+cell_of_lonlat <- function(lon, lat, ncol = 7200L, nrow = 3600L, res = 0.05) {
+  col <- pmin(pmax(floor((lon + 180) / res + 1e-9), 0), ncol - 1)
+  row <- pmin(pmax(floor((90 - lat) / res + 1e-9), 0), nrow - 1)
+  as.integer(row * ncol + col + 1)
+}
+#' @rdname cell_of_lonlat
+lonlat_of_cell <- function(cell_id, ncol = 7200L, nrow = 3600L, res = 0.05) {
+  i <- as.numeric(cell_id) - 1
+  data.frame(
+    lon = -180 + (i %% ncol + 0.5) * res,
+    lat = 90 - (i %/% ncol + 0.5) * res)
+}
+#' @rdname cell_of_lonlat
+tile_of_cell <- function(cell_id, ncol = 7200L, tile_cells = 100L) {
+  i <- as.numeric(cell_id) - 1
+  as.integer((i %/% ncol %/% tile_cells) * (ncol %/% tile_cells) + (i %% ncol) %/% tile_cells)
+}
+
+#' SQL: stage 1 of the cell -> species table, per species batch
+#'
+#' Writes the batch's (cell_id, aphia_id, suit) rows, partitioned by 5 degree row band
+#' (`band = row div 100`, 0..35), to `<dir_cs>/batch_<id>/band=<b>/data_0.parquet`;
+#' suit = round(v) as UTINYINT (v = max over the species' models, 1..100).
+#'
+#' @param batch_id integer batch number
+#' @param dir_cs directory of the stage-1 partials
+#' @param clip_tbl relation with aphia_id, cell_id, v (the clipped distribution)
+cell_species_stage1_sql <- function(batch_id, dir_cs, clip_tbl = "clip_b") {
+  d <- file.path(dir_cs, sprintf("batch_%05d", as.integer(batch_id)))
+  glue::glue("
+    COPY (
+      SELECT CAST(cell_id AS INTEGER) AS cell_id,
+             CAST(aphia_id AS INTEGER) AS aphia_id,
+             CAST(round(v) AS UTINYINT) AS suit,
+             ((cell_id - 1) // 7200) // 100 AS band
+      FROM {clip_tbl})
+    TO '{d}' (FORMAT parquet, COMPRESSION zstd, PARTITION_BY (band), OVERWRITE_OR_IGNORE true)")
+}
+
+#' Path of a tile file
+cell_species_tile_path <- function(dir_out, tile) {
+  file.path(dir_out, paste0("tile=", tile), "data_0.parquet")
+}
+
+#' SQL: stage 2 of the cell -> species table, per 5 degree band
+#'
+#' `load` reads the band's stage-1 files into the temp table `band_t` with the tile
+#' column `c`; `cols` lists the non-empty tile columns; `tile(c)` writes one tile,
+#' ordered by cell_id then suit DESC, to `<tile path>.tmp` (rename it with
+#' [cell_species_commit()] so a half-written file is never taken for a finished one).
+#'
+#' @param band 0..35
+#' @param dir_cs stage-1 directory
+#' @param dir_out output directory (`cell_species/`)
+#' @param row_group_size rows per row group (small row groups make cell_id statistics selective)
+#' @return list(load, cols, tile = function(c), drop)
+cell_species_stage2_sql <- function(band, dir_cs, dir_out, row_group_size = 32768L) {
+  band <- as.integer(band)
+  list(
+    load = glue::glue("
+      CREATE OR REPLACE TEMP TABLE band_t AS
+      SELECT cell_id, aphia_id, suit, ((cell_id - 1) % 7200) // 100 AS c
+      FROM read_parquet('{dir_cs}/batch_*/band={band}/*.parquet', hive_partitioning = false)"),
+    cols = "SELECT DISTINCT c FROM band_t ORDER BY c",
+    tile = function(c) {
+      t   <- band * 72L + as.integer(c)
+      tmp <- paste0(cell_species_tile_path(dir_out, t), ".tmp")
+      glue::glue("
+        COPY (
+          SELECT cell_id, aphia_id, suit FROM band_t WHERE c = {as.integer(c)}
+          ORDER BY cell_id, suit DESC, aphia_id)
+        TO '{tmp}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {as.integer(row_group_size)})")
+    },
+    drop = "DROP TABLE IF EXISTS band_t")
+}
+
+#' Move a finished `.tmp` tile into place
+cell_species_commit <- function(dir_out, tile) {
+  f <- cell_species_tile_path(dir_out, tile)
+  stopifnot(file.exists(paste0(f, ".tmp")))
+  file.rename(paste0(f, ".tmp"), f)
+  invisible(f)
+}
+
+#' Check that a tile's cell_id row-group statistics are sorted and non-overlapping
+#'
+#' Reads `parquet_metadata()` and asserts that every row group has cell_id min <= max
+#' and that each row group starts at or after the previous one ended (the same cell may
+#' straddle two row groups). This is what lets a reader prune to one row group.
+#'
+#' @param file tile parquet file
+#' @param con a DuckDB connection (a temporary one when NULL)
+#' @return invisibly, the row-group table; stops with a message when not monotone
+cell_species_check <- function(file, con = NULL) {
+  if (is.null(con)) {
+    con <- DBI::dbConnect(duckdb::duckdb())
+    on.exit(DBI::dbDisconnect(con, shutdown = T))
+  }
+  rg <- DBI::dbGetQuery(con, glue::glue("
+    SELECT row_group_id, CAST(stats_min_value AS BIGINT) AS cell_min,
+           CAST(stats_max_value AS BIGINT) AS cell_max
+    FROM parquet_metadata('{file}')
+    WHERE path_in_schema = 'cell_id'
+    ORDER BY row_group_id"))
+  if (nrow(rg) == 0 || anyNA(rg$cell_min) || anyNA(rg$cell_max))
+    stop("no cell_id row-group statistics in ", file)
+  if (any(rg$cell_min > rg$cell_max))
+    stop("cell_id min > max in a row group of ", file)
+  if (nrow(rg) > 1 && any(rg$cell_min[-1] < rg$cell_max[-nrow(rg)]))
+    stop("cell_id row-group statistics overlap or are not sorted in ", file)
+  invisible(rg)
+}
+
+#' SQL: the species lookup (eov_taxa plus names, ids and links)
+#'
+#' One row per taxon x EOV: all columns of `taxa_tbl` plus `common_name` (WoRMS
+#' English, preferred name first), `sp_key` (the aquamaps_native registry's sp_key for
+#' the AphiaID when present, else the first of `sp_keys`), `sis_taxon_id` and
+#' `iucn_url` (latest Red List assessment matched by lower-case scientific name),
+#' `worms_url` and `aquamaps_url`.
+#'
+#' @param taxa_tbl relation with aphia_id, scientific_name, sp_keys, ...
+#' @param vern_tbl relation taxonID, vernacularName, language, isPreferredName
+#' @param registry relation aphia_id, sp_key (the aquamaps_native registry)
+#' @param redlist_tbl relation taxon_scientific_name, sis_taxon_id, url, latest
+#' @param aquamaps_url template with `{sp_key}`
+species_lookup_sql <- function(
+    taxa_tbl = "eov_taxa", vern_tbl = "spp.worms_vernacular",
+    registry = "read_parquet('https://s3.us-east-1.amazonaws.com/oceanmetrics.io-public/atlas/aquamaps_native/registry.parquet')",
+    redlist_tbl = "spp.iucn_redlist",
+    aquamaps_url = "https://www.aquamaps.org/preMap2.php?cache=1&SpecID={sp_key}") {
+  url_sql <- gsub("\\{sp_key\\}", "' || sp_key || '", aquamaps_url)
+  glue::glue("
+    WITH vn AS (
+      SELECT taxonID AS aphia_id, vernacularName AS common_name
+      FROM {vern_tbl}
+      WHERE language = 'ENG'
+      QUALIFY row_number() OVER (
+        PARTITION BY taxonID
+        ORDER BY coalesce(CAST(isPreferredName AS INTEGER), 0) DESC, vernacularName) = 1),
+    rg AS (
+      SELECT CAST(aphia_id AS BIGINT) AS aphia_id, min(sp_key) AS sp_key
+      FROM {registry} WHERE aphia_id IS NOT NULL GROUP BY 1),
+    iu AS (
+      SELECT lower(taxon_scientific_name) AS k, sis_taxon_id, url AS iucn_url
+      FROM {redlist_tbl} WHERE latest
+      QUALIFY row_number() OVER (
+        PARTITION BY lower(taxon_scientific_name) ORDER BY year_published DESC) = 1)
+    SELECT *, CASE WHEN sp_key IS NULL THEN NULL ELSE '{url_sql}' END AS aquamaps_url
+    FROM (
+      SELECT t.*,
+             vn.common_name,
+             coalesce(rg.sp_key, nullif(split_part(t.sp_keys, ';', 1), '')) AS sp_key,
+             iu.sis_taxon_id,
+             iu.iucn_url,
+             'https://www.marinespecies.org/aphia.php?p=taxdetails&id=' || t.aphia_id AS worms_url
+      FROM {taxa_tbl} t
+      LEFT JOIN vn ON vn.aphia_id = t.aphia_id
+      LEFT JOIN rg ON rg.aphia_id = t.aphia_id
+      LEFT JOIN iu ON iu.k = lower(t.scientific_name))
+    ORDER BY eov, aphia_id")
 }
 
 # score ----

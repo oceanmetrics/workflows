@@ -125,6 +125,7 @@ share_fixture <- function(con, dir = tempfile()) {
   part <- file.path(dir, "partials")
   dir.create(file.path(part, "totals"), recursive = T)
   dir.create(file.path(part, "cell_eov"), recursive = T)
+  dir.create(file.path(dir, "cs"))                       # the notebook creates dir_cs up front
   batches <- list(
     list(id = 1L, eov = "hardCorals", am = c(am$C1, am$C2), rng = character(), multi = TRUE),
     list(id = 2L, eov = "fish", am = c(am$A, am$B, am$D), rng = c(rng$A, rng$D), multi = FALSE))
@@ -133,18 +134,18 @@ share_fixture <- function(con, dir = tempfile()) {
     st <- eov_batch_sql(
       batch_id = b$id, am_files = b$am, rng_files = b$rng, has_multi = b$multi,
       map_tbl = "map", area_tbl = "area", weight_tbl = "wt", eov_tbl = "eov",
-      dir_partials = part, rng_map_tbl = "rng_map", eov = b$eov)
+      dir_partials = part, rng_map_tbl = "rng_map", eov = b$eov, dir_cs = file.path(dir, "cs"))
     for (s in st) DBI::dbExecute(con, s)
     sqls[[b$id]] <- st
   }
   for (s in eov_merge_sql(part, "map")) DBI::dbExecute(con, s)
-  list(sql = sqls, dir = part)
+  list(sql = sqls, dir = part, cs = file.path(dir, "cs"), root = dir)
 }
 
 test_that("batch sql: statements, partial files and temp tables dropped", {
   con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
   fx <- share_fixture(con)
-  expect_named(fx$sql[[2]], c("rng_b", "clip_b", "tot_b", "cell_eov", "totals", "drop"))
+  expect_named(fx$sql[[2]], c("rng_b", "clip_b", "tot_b", "cell_eov", "cell_species", "totals", "drop"))
   expect_true(all(file.exists(file.path(fx$dir, c("totals", "cell_eov"), "batch_00001.parquet"))))
   expect_true(all(file.exists(file.path(fx$dir, c("totals", "cell_eov"), "batch_00002.parquet"))))
   expect_false(any(c("clip_b", "tot_b", "rng_b") %in% DBI::dbListTables(con)))
@@ -493,4 +494,125 @@ test_that("h3 sql: area-weighted mean per H3 cell", {
   expect_equal(nrow(out), 1L)
   expect_equal(out$n_cells, 3)
   expect_equal(out$score, 75)       # (0*1 + 100*3) / (1 + 3); the NA cell is ignored
+})
+
+# cell -> species table ----
+test_that("grid math: lon/lat <-> cell_id <-> tile", {
+  expect_equal(cell_of_lonlat(-86.73, 21.62), 9844266L)
+  expect_equal(tile_of_cell(9844266), 954L)
+  ll <- lonlat_of_cell(9844266)
+  expect_equal(ll$lon, -86.725); expect_equal(ll$lat, 21.625)
+  expect_equal(cell_of_lonlat(ll$lon, ll$lat), 9844266L)
+  # corners and the outer edge
+  expect_equal(cell_of_lonlat(-180, 90), 1L)
+  expect_equal(cell_of_lonlat(180, -90), 25920000L)
+  expect_equal(tile_of_cell(1), 0L)
+  expect_equal(tile_of_cell(25920000), 2591L)
+  # round trip of random cells, and a tile holds at most 100 x 100 cells
+  set.seed(3)
+  id <- sample.int(25920000, 5000)
+  ll <- lonlat_of_cell(id)
+  expect_equal(cell_of_lonlat(ll$lon, ll$lat), as.integer(id))
+  expect_true(all(table(tile_of_cell(1:25920000)) == 10000))
+  expect_equal(unname(tile_of_cell(c(1, 100, 101, 720001))), c(0L, 0L, 1L, 72L))
+})
+
+read_tiles <- function(con, dir_out) {
+  DBI::dbGetQuery(con, glue::glue("SELECT * FROM read_parquet('{dir_out}/tile=*/data_0.parquet', hive_partitioning = false)"))
+}
+run_stage2 <- function(con, dir_cs, dir_out, bands, row_group_size = 32768L) {
+  for (b in bands) {
+    st <- cell_species_stage2_sql(b, dir_cs, dir_out, row_group_size)
+    dir.create(dirname(dirname(cell_species_tile_path(dir_out, b * 72L))), showWarnings = F)
+    DBI::dbExecute(con, st$load)
+    for (cc in DBI::dbGetQuery(con, st$cols)$c) {
+      t <- b * 72L + cc
+      dir.create(dirname(cell_species_tile_path(dir_out, t)), recursive = T, showWarnings = F)
+      DBI::dbExecute(con, st$tile(cc))
+      cell_species_commit(dir_out, t)
+    }
+    DBI::dbExecute(con, st$drop)
+  }
+}
+
+test_that("cell species: stage 1 + 2 on the fixture give sorted tiles, suit = round(max v), clipped cells absent", {
+  con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
+  fx  <- share_fixture(con)
+  expect_true(file.exists(file.path(fx$cs, "batch_00001", "band=0", "data_0.parquet")))
+  out <- file.path(fx$root, "cell_species"); dir.create(out)
+  run_stage2(con, fx$cs, out, 0L)
+  d <- read_tiles(con, out)
+  expect_equal(names(d), c("cell_id", "aphia_id", "suit"))
+  # tile 0 holds all 6 cells; no tmp files left over
+  expect_equal(list.files(out, recursive = T), "tile=0/data_0.parquet")
+  expect_equal(nrow(d), 9L)                               # A 3 + B 3 + C 3; D excluded
+  # sorted by cell_id, then suit DESC
+  expect_equal(d$cell_id, c(1L, 1L, 2L, 2L, 3L, 3L, 4L, 5L, 6L))
+  expect_equal(d$aphia_id, c(102L, 103L, 103L, 101L, 101L, 103L, 101L, 102L, 102L))
+  expect_equal(d$suit, c(50L, 10L, 60L, 20L, 30L, 20L, 40L, 50L, 100L))   # C c2 = max(30, 60)
+  # A (range c2-c4) has no row in the clipped-out cell 1; D has none at all
+  expect_false(any(d$cell_id == 1L & d$aphia_id == 101L))
+  expect_false(any(d$aphia_id == 104L))
+  types <- DBI::dbGetQuery(con, glue::glue("DESCRIBE SELECT * FROM read_parquet('{out}/tile=0/data_0.parquet')"))
+  expect_equal(types$column_type, c("INTEGER", "INTEGER", "UTINYINT"))
+  expect_silent(cell_species_check(cell_species_tile_path(out, 0L), con))
+})
+
+test_that("cell species: rounding, several bands and tiles, one row group per cell range", {
+  con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
+  dir <- tempfile(); dir.create(dir)
+  # cells in band 0 tile 0, band 0 tile 1, band 1 tile 72
+  DBI::dbWriteTable(con, "clip_t", data.frame(
+    aphia_id = c(1L, 2L, 1L, 3L), cell_id = c(1L, 1L, 105L, 720001L),
+    v = c(10.4, 10.6, 99.5, 1.0)))
+  dir.create(file.path(dir, "cs"))
+  DBI::dbExecute(con, cell_species_stage1_sql(7L, file.path(dir, "cs"), "clip_t"))
+  expect_setequal(list.files(file.path(dir, "cs", "batch_00007")), c("band=0", "band=1"))
+  out <- file.path(dir, "cell_species"); dir.create(out)
+  run_stage2(con, file.path(dir, "cs"), out, 0:1)
+  expect_setequal(list.files(out), c("tile=0", "tile=1", "tile=72"))
+  d <- read_tiles(con, out)
+  expect_equal(d$suit[order(d$cell_id, d$aphia_id)], c(10L, 11L, 100L, 1L))   # round(10.4), round(10.6), round(99.5)
+  expect_equal(tile_of_cell(sort(unique(d$cell_id))), c(0L, 1L, 72L))
+})
+
+test_that("cell species check: passes on a sorted file, fails on a shuffled one", {
+  con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
+  DBI::dbWriteTable(con, "tt", data.frame(
+    cell_id = rep(1:2000, each = 3), aphia_id = rep(1:3, 2000), suit = 50L))
+  good <- tempfile(fileext = ".parquet"); bad <- tempfile(fileext = ".parquet")
+  DBI::dbExecute(con, glue::glue("COPY (SELECT * FROM tt ORDER BY cell_id, aphia_id) TO '{good}' (FORMAT parquet, ROW_GROUP_SIZE 2048)"))
+  DBI::dbExecute(con, glue::glue("COPY (SELECT * FROM tt ORDER BY hash(cell_id * 7 + aphia_id)) TO '{bad}' (FORMAT parquet, ROW_GROUP_SIZE 2048)"))
+  rg <- cell_species_check(good, con)
+  expect_equal(nrow(rg), 3L)
+  expect_true(all(rg$cell_min <= rg$cell_max))
+  expect_error(cell_species_check(bad, con), "overlap or are not sorted")
+  # a cell straddling two row groups (2048 is not a multiple of 3) is fine
+  expect_true(rg$cell_max[1] == rg$cell_min[2])
+})
+
+test_that("species lookup: preferred English name, registry sp_key, fallback, links", {
+  con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
+  DBI::dbWriteTable(con, "tx", data.frame(
+    aphia_id = c(1L, 2L, 3L), scientific_name = c("Alpha beta", "Gamma delta", "Eps zeta"),
+    eov = c("fish", "fish", "seaTurtles"), sp_keys = c("Fis-1;Fis-2", "Fis-3", "Rep-9"),
+    total_suit_area = c(10, 20, 30)))
+  DBI::dbWriteTable(con, "vern", data.frame(
+    taxonID = c(1L, 1L, 1L, 2L, 3L),
+    vernacularName = c("zzz name", "Preferred name", "Nom", "Gamma fish", "Turtle"),
+    language = c("ENG", "ENG", "FRA", "ENG", "ENG"),
+    isPreferredName = c(0, 1, 1, 0, NA)))
+  DBI::dbWriteTable(con, "reg", data.frame(aphia_id = c(1L, 1L, 2L), sp_key = c("Fis-2", "Fis-1", NA)))
+  DBI::dbWriteTable(con, "iu", data.frame(
+    taxon_scientific_name = c("ALPHA BETA", "Alpha beta", "Eps zeta"), sis_taxon_id = c(10L, 11L, 12L),
+    url = c("u-old", "u-new", "u-eps"), latest = c(TRUE, TRUE, FALSE), year_published = c(2020L, 2024L, 2020L)))
+  d <- DBI::dbGetQuery(con, species_lookup_sql("tx", "vern", "reg", "iu"))
+  expect_equal(nrow(d), 3L)
+  expect_equal(d$common_name, c("Preferred name", "Gamma fish", "Turtle"))
+  expect_equal(d$sp_key, c("Fis-1", "Fis-3", "Rep-9"))     # registry (min) / first of sp_keys / first of sp_keys
+  expect_equal(d$sis_taxon_id, c(11L, NA, NA))             # latest assessment by name only
+  expect_equal(d$iucn_url, c("u-new", NA, NA))
+  expect_equal(d$worms_url[1], "https://www.marinespecies.org/aphia.php?p=taxdetails&id=1")
+  expect_equal(d$aquamaps_url[3], "https://www.aquamaps.org/preMap2.php?cache=1&SpecID=Rep-9")
+  expect_true(all(c("total_suit_area", "eov", "sp_keys") %in% names(d)))
 })
