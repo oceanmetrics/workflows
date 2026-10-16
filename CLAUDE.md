@@ -32,6 +32,13 @@ the data produced here, e.g. `../apps/indicators/app.R`).
   - `indicators.pmtiles` via `tippecanoe` then `pmtiles convert` (both from Homebrew), uploaded with `aws.s3`
     to the public bucket `oceanmetrics.io-public` (us-east-1). AWS keys come from a CSV in
     `~/My Drive/private/`.
+
+  Intermediate files (`fid.geojson`, `data_long.csv`, `data_wide.csv`, `layers.csv`, the `.mbtiles` and
+  `.pmtiles`) are written next to the raw data on Google Drive, not into this repo. A `stop_eval` chunk
+  (`knitr::opts_chunk$set(eval = F)`) sits just after the `mapgl` chunk, so a normal render stops before the
+  tippecanoe, PMTiles and S3 steps (and the WDPA section at the end). To rebuild tiles, run those chunks by
+  hand. The S3 upload is skipped when the object already exists, so replacing `indicators.pmtiles` means
+  deleting or overwriting it explicitly.
 - `explore_geoarrow.qmd`: experiments writing/reading `sf` data as GeoParquet locally and on S3, including the
   bucket's public-read policy and CORS config. `data/geoarrow/` holds its small sample files.
 

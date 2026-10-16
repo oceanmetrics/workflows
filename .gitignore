@@ -6,3 +6,10 @@
 **/.claude/settings.local.json
 _environment
 .DS_Store
+node_modules/
+_output/logs/
+.claude/plans
+.claude/plans_todo
+.claude/plans_done
+.claude/notes
+.claude/worktrees/
