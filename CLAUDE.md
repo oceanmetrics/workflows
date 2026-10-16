@@ -57,3 +57,24 @@ short layer keys (e.g. `al_er_su_wr`) stored in `ds_indicators_lyrs` (see `dev/c
 Observable JS (`{ojs}`) chunks that read GeoParquet from S3 with DuckDB/geoarrow-js were tried and abandoned
 for spatial data (commits `ff972c7`, `fb42495`); prefer R chunks for mapping. `dev/claude_prompts.md` records
 earlier prompts and outcomes for this repo.
+
+## aquamaps_eov.qmd (AquaMaps EOV share product)
+
+- Pipeline and documentation in one notebook. Reads the MarineSensitivity v9 files in `MSENS_DERIVED`
+  (default `~/_big/msens/derived`), computes the per-cell, per-EOV share and risk (Butchart/OHI weights), scores,
+  composite and an H3 twin, and stages the product in `~/_big/oceanmetrics/aquamaps_eov/<ver>/` (never in git):
+  COGs `score_*.tif`/`density_*.tif`, `cells/eov=<g>/data.parquet`, `h3_r5.parquet`, `eov_taxa.parquet`,
+  `eov_summary.csv`, `method.json`, `provenance.json`, README/AGENTS, STAC `collection.json` + 16 `items/`.
+  The DuckDB work file and checkpoints are in `~/_big/oceanmetrics/aquamaps_eov/work_<ver>/`.
+- Flags (environment): `EOV_TEST_N=<n>` first n species per EOV, writes to `.../test`, never uploads;
+  `EOV_REDO=1` recompute checkpoints; `EOV_S3=1` upload with `aws s3 sync --delete` (the only side effect);
+  `EOV_WEIGHTS=ohi|mst_v1`; `EOV_Q=0.99`; `EOV_VERIFY_N=20` COG spot-check against the published
+  `aquamaps_native` COGs (0 skips); `BUILD_MEMORY_GB`, `BUILD_THREADS`.
+- Every scientific rule is a function in `R/eov_share.R` (seeds, WoRMS subtree CTE, Red List weights, share SQL,
+  score, composite, `cells_to_raster`, STAC builders); `tests/testthat/test-eov_share.R` asserts them on synthetic
+  fixtures. Change a rule there and in its test in the same commit; run
+  `Rscript -e 'testthat::test_dir("tests/testthat")'` before rendering.
+- Diagrams: edit `diagrams/*.mmd`, run `libs/render_diagrams.sh` (uses `node_modules/.bin/mmdc` or `mmdc` on the
+  PATH), commit the `.svg`. The zoom viewer is `libs/diagram.js`, included by `libs/diagram-head.html`.
+- Quick check: `EOV_TEST_N=40 EOV_VERIFY_N=3 quarto render aquamaps_eov.qmd`. Commit the re-rendered
+  `_output/aquamaps_eov.html` and `_output/aquamaps_eov_files/` (Pages builds from `_output/`).
