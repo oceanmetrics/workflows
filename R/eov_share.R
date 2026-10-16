@@ -153,102 +153,154 @@ eov_summarize_taxa <- function(taxa) {
 
 # share ----
 
-#' SQL: the species-share and EOV-aggregation statements (DuckDB)
+#' Assign species to batches (one pass over the AquaMaps rows, restartable)
 #'
-#' Steps 1-5 of the method (see aquamaps_eov.qmd). Returns a named list of SQL
-#' statements to run in order; the ones that create TABLEs are the checkpoints.
+#' Species are ordered by EOV then aphia_id and filled into batches whose summed
+#' `n_rows` stays within `max_rows`. A batch never splits a species and never mixes
+#' EOVs; a species bigger than the cap gets a batch of its own.
 #'
-#' 1. `sp_map` (table): model to species, with `n_models` and `has_range`.
-#' 2. `sp_cell` (view): v = suitability per species and cell, the max over the
-#'    species' models (single-model species avoid the group-by).
-#' 3. `sp_clip` (view): u = v inside the IUCN range footprint when the species has
-#'    one, else v over the full distribution.
-#' 4. `sp_total` (table): per species, n_cells and total = sum(u * area_km2); a
-#'    species with total 0 is `excluded`.
-#' 5. `sp_share` (view): share = u * area_km2 / total.
-#' 6. `cell_eov` (table): per cell and EOV, `share` = sum(share) over every taxon
-#'    and `risk` = sum(weight * share); NULL weights add nothing to `risk`.
+#' @param species data.frame with eov, aphia_id, n_rows (rows to read for the species)
+#' @param max_rows row cap per batch
+#' @return `species` ordered, with an integer column `batch_id`
+eov_make_batches <- function(species, max_rows = 80e6) {
+  stopifnot(all(c("eov", "aphia_id", "n_rows") %in% names(species)))
+  s    <- species[order(species$eov, species$aphia_id), , drop = F]
+  id   <- integer(nrow(s))
+  b    <- 0L
+  cum  <- 0
+  prev <- NA_character_
+  for (i in seq_len(nrow(s))) {
+    new <- i == 1L || s$eov[i] != prev || (cum > 0 && cum + s$n_rows[i] > max_rows)
+    if (new) { b <- b + 1L; cum <- 0 }
+    cum   <- cum + s$n_rows[i]
+    id[i] <- b
+    prev  <- s$eov[i]
+  }
+  s$batch_id <- id
+  rownames(s) <- NULL
+  s
+}
+
+.sql_files <- function(x) paste0("'", x, "'", collapse = ", ")
+
+#' SQL: the statements that process one batch of species (DuckDB)
 #'
-#' @param am_tbl relation with mdl_key, cell_id, val (the AquaMaps partitions)
-#' @param map_tbl relation with mdl_key, aphia_id (AquaMaps model to WoRMS species)
-#' @param rng_tbl relation with aphia_id, cell_id (IUCN range footprint)
-#' @param area_tbl relation with cell_id, area_km2
-#' @param eov_tbl relation with eov, aphia_id (membership)
-#' @param weight_tbl relation with aphia_id, weight (NULL weight = no weight)
-#' @param out_prefix prefix of the created tables and views
-#' @return named list of SQL strings: sp_map, sp_cell, sp_clip, sp_total,
-#'   sp_share, cell_eov
-eov_share_sql <- function(
-    am_tbl, map_tbl, rng_tbl, area_tbl, eov_tbl, weight_tbl,
-    out_prefix = "eov_") {
+#' Steps 1-5 of the method for the species of one batch, in this order:
+#'
+#' 1. `rng_b` (temp table): range footprint (aphia_id, cell_id) of the batch's range
+#'    files, empty when there are none.
+#' 2. `clip_b` (temp table): ua = u * area_km2 per species and cell, where v is the
+#'    max over the species' models (grouped only when `has_multi`), clipped to the
+#'    range footprint if the species has one, else the full distribution.
+#' 3. `tot_b` (temp table): per species n_cells and total = sum(ua).
+#' 4. `cell_eov`: COPY to `<dir_partials>/cell_eov/batch_<id>.parquet`, per cell and
+#'    EOV share = sum(ua / total) and risk = sum(weight * ua / total); NULL weights add
+#'    nothing to risk; species with total 0 are left out.
+#' 5. `totals`: COPY of `tot_b` to `<dir_partials>/totals/batch_<id>.parquet`
+#'    (written last, so a batch is complete when both files exist).
+#' 6. `drop`: remove the temp tables.
+#'
+#' @param batch_id integer batch number
+#' @param am_files AquaMaps partition files of the batch's models
+#' @param rng_files IUCN range partition files of the batch's species (may be empty)
+#' @param has_multi TRUE when a species in the batch has more than one model
+#' @param map_tbl relation mdl_key, aphia_id, n_models, has_range (AquaMaps models)
+#' @param area_tbl relation cell_id, area_km2
+#' @param weight_tbl relation aphia_id, weight (NULL = no weight)
+#' @param eov_tbl relation eov, aphia_id (membership)
+#' @param dir_partials directory of the partial files
+#' @param rng_map_tbl relation mdl_key, aphia_id (range models to species)
+#' @param eov restrict the EOV aggregation to this EOV (the batch's EOV)
+#' @return named list of SQL strings: rng_b, clip_b, tot_b, cell_eov, totals, drop
+eov_batch_sql <- function(
+    batch_id, am_files, rng_files = character(), has_multi = FALSE,
+    map_tbl, area_tbl, weight_tbl, eov_tbl, dir_partials,
+    rng_map_tbl = "rng_map", eov = NULL) {
+  id    <- sprintf("%05d", as.integer(batch_id))
+  f_tot <- file.path(dir_partials, "totals",   paste0("batch_", id, ".parquet"))
+  f_cel <- file.path(dir_partials, "cell_eov", paste0("batch_", id, ".parquet"))
+  am    <- .sql_files(am_files)
+  sp_rows <- if (has_multi) {
+    glue::glue("
+      SELECT m.aphia_id, a.cell_id, max(a.val) AS v
+      FROM read_parquet([{am}], hive_partitioning = false) a
+      JOIN {map_tbl} m ON m.mdl_key = a.mdl_key
+      GROUP BY m.aphia_id, a.cell_id")
+  } else {
+    glue::glue("
+      SELECT m.aphia_id, a.cell_id, a.val AS v
+      FROM read_parquet([{am}], hive_partitioning = false) a
+      JOIN {map_tbl} m ON m.mdl_key = a.mdl_key")
+  }
+  rng_b <- if (length(rng_files) > 0) {
+    glue::glue("
+      CREATE OR REPLACE TEMP TABLE rng_b AS
+      SELECT DISTINCT m.aphia_id, r.cell_id
+      FROM read_parquet([{.sql_files(rng_files)}], hive_partitioning = false) r
+      JOIN {rng_map_tbl} m ON m.mdl_key = r.mdl_key")
+  } else {
+    "CREATE OR REPLACE TEMP TABLE rng_b (aphia_id BIGINT, cell_id INTEGER)"
+  }
+  only_eov <- if (is.null(eov)) "" else glue::glue("AND e.eov = '{eov}'")
+  list(
+    rng_b = rng_b,
+    clip_b = glue::glue("
+      CREATE OR REPLACE TEMP TABLE clip_b AS
+      SELECT s.aphia_id, s.cell_id, s.v * a.area_km2 AS ua
+      FROM ({sp_rows}) s
+      JOIN {area_tbl} a ON a.cell_id = s.cell_id
+      JOIN (SELECT DISTINCT aphia_id, has_range FROM {map_tbl}) m ON m.aphia_id = s.aphia_id
+      LEFT JOIN rng_b r ON r.aphia_id = s.aphia_id AND r.cell_id = s.cell_id
+      WHERE NOT m.has_range OR r.cell_id IS NOT NULL"),
+    tot_b = "
+      CREATE OR REPLACE TEMP TABLE tot_b AS
+      SELECT aphia_id, count(*)::BIGINT AS n_cells, sum(ua) AS total_suit_area
+      FROM clip_b GROUP BY aphia_id",
+    cell_eov = glue::glue("
+      COPY (
+        SELECT c.cell_id, e.eov,
+               sum(c.ua / t.total_suit_area)                        AS share,
+               sum(coalesce(w.weight, 0.0) * c.ua / t.total_suit_area) AS risk
+        FROM clip_b c
+        JOIN tot_b t ON t.aphia_id = c.aphia_id
+        JOIN {eov_tbl} e ON e.aphia_id = c.aphia_id
+        LEFT JOIN {weight_tbl} w ON w.aphia_id = c.aphia_id
+        WHERE t.total_suit_area > 0 {only_eov}
+        GROUP BY c.cell_id, e.eov)
+      TO '{f_cel}' (FORMAT parquet, COMPRESSION zstd)"),
+    totals = glue::glue("COPY tot_b TO '{f_tot}' (FORMAT parquet, COMPRESSION zstd)"),
+    drop = "DROP TABLE IF EXISTS clip_b; DROP TABLE IF EXISTS tot_b; DROP TABLE IF EXISTS rng_b")
+}
+
+#' SQL: merge the partial files of all batches
+#'
+#' `eov_sp_total` (per species: n_models, has_range, n_cells, total_suit_area,
+#' excluded; a species without a totals row or with total <= 0 is excluded with 0
+#' cells) and `eov_cell_eov` (per cell and EOV: share and risk summed over batches).
+#'
+#' @param dir_partials directory with `totals/` and `cell_eov/`
+#' @param map_tbl relation mdl_key, aphia_id, n_models, has_range
+#' @param out_prefix prefix of the created tables
+#' @return named list of SQL strings: sp_total, cell_eov
+eov_merge_sql <- function(dir_partials, map_tbl, out_prefix = "eov_") {
   p <- out_prefix
   list(
-    sp_map = glue::glue("
-      CREATE OR REPLACE TABLE {p}sp_map AS
-      SELECT
-        m.mdl_key,
-        m.aphia_id,
-        count(*) OVER (PARTITION BY m.aphia_id)               AS n_models,
-        m.aphia_id IN (SELECT aphia_id FROM {rng_tbl})        AS has_range
-      FROM (SELECT DISTINCT mdl_key, aphia_id FROM {map_tbl}) m"),
-    sp_cell = glue::glue("
-      CREATE OR REPLACE VIEW {p}sp_cell AS
-      SELECT m.aphia_id, a.cell_id, a.val AS v
-      FROM {am_tbl} a
-      JOIN {p}sp_map m ON m.mdl_key = a.mdl_key
-      WHERE m.n_models = 1
-      UNION ALL
-      SELECT m.aphia_id, a.cell_id, max(a.val) AS v
-      FROM {am_tbl} a
-      JOIN {p}sp_map m ON m.mdl_key = a.mdl_key
-      WHERE m.n_models > 1
-      GROUP BY m.aphia_id, a.cell_id"),
-    sp_clip = glue::glue("
-      CREATE OR REPLACE VIEW {p}sp_clip AS
-      SELECT s.aphia_id, s.cell_id, s.v AS u
-      FROM {p}sp_cell s
-      WHERE s.aphia_id IN (SELECT aphia_id FROM {p}sp_map WHERE NOT has_range)
-      UNION ALL
-      SELECT s.aphia_id, s.cell_id, s.v AS u
-      FROM {p}sp_cell s
-      WHERE EXISTS (
-        SELECT 1 FROM {rng_tbl} r
-        WHERE r.aphia_id = s.aphia_id AND r.cell_id = s.cell_id)"),
     sp_total = glue::glue("
       CREATE OR REPLACE TABLE {p}sp_total AS
-      SELECT
-        m.aphia_id,
-        m.n_models,
-        m.has_range,
-        coalesce(t.n_cells, 0)                AS n_cells,
-        coalesce(t.total_suit_area, 0.0)      AS total_suit_area,
-        coalesce(t.total_suit_area, 0.0) <= 0 AS excluded
-      FROM (SELECT DISTINCT aphia_id, n_models, has_range FROM {p}sp_map) m
+      SELECT m.aphia_id, m.n_models, m.has_range,
+             coalesce(t.n_cells, 0)                AS n_cells,
+             coalesce(t.total_suit_area, 0.0)      AS total_suit_area,
+             coalesce(t.total_suit_area, 0.0) <= 0 AS excluded
+      FROM (SELECT DISTINCT aphia_id, n_models, has_range FROM {map_tbl}) m
       LEFT JOIN (
-        SELECT c.aphia_id, count(*) AS n_cells,
-               sum(c.u * a.area_km2) AS total_suit_area
-        FROM {p}sp_clip c
-        JOIN {area_tbl} a ON a.cell_id = c.cell_id
-        GROUP BY c.aphia_id) t
-        ON t.aphia_id = m.aphia_id"),
-    sp_share = glue::glue("
-      CREATE OR REPLACE VIEW {p}sp_share AS
-      SELECT c.aphia_id, c.cell_id, c.u * a.area_km2 / t.total_suit_area AS share
-      FROM {p}sp_clip c
-      JOIN {area_tbl} a ON a.cell_id = c.cell_id
-      JOIN {p}sp_total t ON t.aphia_id = c.aphia_id
-      WHERE NOT t.excluded"),
+        SELECT aphia_id, max(n_cells) AS n_cells, max(total_suit_area) AS total_suit_area
+        FROM read_parquet('{dir_partials}/totals/*.parquet')
+        GROUP BY aphia_id) t ON t.aphia_id = m.aphia_id"),
     cell_eov = glue::glue("
       CREATE OR REPLACE TABLE {p}cell_eov AS
-      SELECT
-        s.cell_id,
-        e.eov,
-        sum(s.share)                           AS share,
-        coalesce(sum(w.weight * s.share), 0.0) AS risk
-      FROM {p}sp_share s
-      JOIN {eov_tbl} e ON e.aphia_id = s.aphia_id
-      LEFT JOIN {weight_tbl} w ON w.aphia_id = s.aphia_id
-      GROUP BY s.cell_id, e.eov"))
+      SELECT cell_id, eov, sum(share) AS share, sum(risk) AS risk
+      FROM read_parquet('{dir_partials}/cell_eov/*.parquet')
+      GROUP BY cell_id, eov"))
 }
 
 # score ----

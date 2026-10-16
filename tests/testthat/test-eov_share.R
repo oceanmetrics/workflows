@@ -86,118 +86,177 @@ test_that("weights: DD, NE, NA carry no weight; unknown codes stop", {
 })
 
 # share ----
-# fixture: 6 cells with unequal areas, 4 species, 5 models
+# fixture: 6 cells with unequal areas, 4 species, 5 models, in two batches
 #   cell      1  2  3  4  5  6
 #   area      1  2  1  4  2  1
 # A (101, fish, VU .4): one model, v 10 20 30 40 on c1-c4; range c2-c4 (c1 clipped out)
 # B (102, fish, DD NULL): no range, v 50 50 100 on c1 c5 c6
 # C (103, hardCorals, CR .8): two models, c1:10 c2:30 | c2:60 c3:20 -> max 10 60 20; no range
 # D (104, fish, EN .6): v 40 40 on c5 c6, range c1 c2 only: zero overlap -> excluded
+# batch 1 = C (has the multi-model species), batch 2 = A, B, D
 share_fixture <- function(con, dir = tempfile()) {
   dir.create(dir)
-  am <- rbind(
-    data.frame(mdl_key = "am|A", cell_id = 1:4,  val = c(10, 20, 30, 40)),
-    data.frame(mdl_key = "am|B", cell_id = c(1L, 5L, 6L), val = c(50, 50, 100)),
-    data.frame(mdl_key = "am|C1", cell_id = 1:2, val = c(10, 30)),
-    data.frame(mdl_key = "am|C2", cell_id = 2:3, val = c(60, 20)),
-    data.frame(mdl_key = "am|D", cell_id = 5:6, val = c(40, 40)))
-  pq <- file.path(dir, "am.parquet")
-  DBI::dbWriteTable(con, "am_raw", am)
-  DBI::dbExecute(con, glue::glue("COPY am_raw TO '{pq}' (FORMAT parquet)"))
+  wr <- function(df, name) {
+    DBI::dbWriteTable(con, "tmp_w", df, overwrite = T)
+    f <- file.path(dir, paste0(name, ".parquet"))
+    DBI::dbExecute(con, glue::glue("COPY tmp_w TO '{f}' (FORMAT parquet)"))
+    f
+  }
+  am <- list(
+    A  = wr(data.frame(mdl_key = "am|A", cell_id = 1:4, val = c(10, 20, 30, 40)), "A"),
+    B  = wr(data.frame(mdl_key = "am|B", cell_id = c(1L, 5L, 6L), val = c(50, 50, 100)), "B"),
+    C1 = wr(data.frame(mdl_key = "am|C1", cell_id = 1:2, val = c(10, 30)), "C1"),
+    C2 = wr(data.frame(mdl_key = "am|C2", cell_id = 2:3, val = c(60, 20)), "C2"),
+    D  = wr(data.frame(mdl_key = "am|D", cell_id = 5:6, val = c(40, 40)), "D"))
+  rng <- list(
+    A = wr(data.frame(mdl_key = "rng|1", cell_id = c(2L, 3L, 4L, 4L)), "rA"),   # duplicate row
+    D = wr(data.frame(mdl_key = "rng|2", cell_id = c(1L, 2L)), "rD"))
   DBI::dbWriteTable(con, "map", data.frame(
-    mdl_key = c("am|A", "am|B", "am|C1", "am|C2", "am|D"),
-    aphia_id = c(101L, 102L, 103L, 103L, 104L)))
-  DBI::dbWriteTable(con, "rng", data.frame(
-    aphia_id = c(101L, 101L, 101L, 101L, 104L, 104L),   # note the duplicate row
-    cell_id  = c(2L, 3L, 4L, 4L, 1L, 2L)))
-  DBI::dbWriteTable(con, "area", data.frame(
-    cell_id = 1:6, area_km2 = c(1, 2, 1, 4, 2, 1)))
+    mdl_key   = c("am|A", "am|B", "am|C1", "am|C2", "am|D"),
+    aphia_id  = c(101L, 102L, 103L, 103L, 104L),
+    n_models  = c(1L, 1L, 2L, 2L, 1L),
+    has_range = c(TRUE, FALSE, FALSE, FALSE, TRUE)))
+  DBI::dbWriteTable(con, "rng_map", data.frame(
+    mdl_key = c("rng|1", "rng|2"), aphia_id = c(101L, 104L)))
+  DBI::dbWriteTable(con, "area", data.frame(cell_id = 1:6, area_km2 = c(1, 2, 1, 4, 2, 1)))
   DBI::dbWriteTable(con, "eov", data.frame(
-    eov = c("fish", "fish", "hardCorals", "fish"),
-    aphia_id = c(101L, 102L, 103L, 104L)))
-  DBI::dbWriteTable(con, "wt", data.frame(
-    aphia_id = 101:104,
-    weight = c(0.4, NA, 0.8, 0.6)))
-  sql <- eov_share_sql(
-    am_tbl = glue::glue("read_parquet('{pq}')"), map_tbl = "map", rng_tbl = "rng",
-    area_tbl = "area", eov_tbl = "eov", weight_tbl = "wt")
-  for (s in sql) DBI::dbExecute(con, s)
-  sql
+    eov = c("fish", "fish", "hardCorals", "fish"), aphia_id = c(101L, 102L, 103L, 104L)))
+  DBI::dbWriteTable(con, "wt", data.frame(aphia_id = 101:104, weight = c(0.4, NA, 0.8, 0.6)))
+  part <- file.path(dir, "partials")
+  dir.create(file.path(part, "totals"), recursive = T)
+  dir.create(file.path(part, "cell_eov"), recursive = T)
+  batches <- list(
+    list(id = 1L, eov = "hardCorals", am = c(am$C1, am$C2), rng = character(), multi = TRUE),
+    list(id = 2L, eov = "fish", am = c(am$A, am$B, am$D), rng = c(rng$A, rng$D), multi = FALSE))
+  sqls <- list()
+  for (b in batches) {
+    st <- eov_batch_sql(
+      batch_id = b$id, am_files = b$am, rng_files = b$rng, has_multi = b$multi,
+      map_tbl = "map", area_tbl = "area", weight_tbl = "wt", eov_tbl = "eov",
+      dir_partials = part, rng_map_tbl = "rng_map", eov = b$eov)
+    for (s in st) DBI::dbExecute(con, s)
+    sqls[[b$id]] <- st
+  }
+  for (s in eov_merge_sql(part, "map")) DBI::dbExecute(con, s)
+  list(sql = sqls, dir = part)
 }
 
-test_that("share sql: statements are the documented checkpoints", {
+test_that("batch sql: statements, partial files and temp tables dropped", {
   con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
-  sql <- share_fixture(con)
-  expect_named(sql, c("sp_map", "sp_cell", "sp_clip", "sp_total", "sp_share", "cell_eov"))
+  fx <- share_fixture(con)
+  expect_named(fx$sql[[2]], c("rng_b", "clip_b", "tot_b", "cell_eov", "totals", "drop"))
+  expect_true(all(file.exists(file.path(fx$dir, c("totals", "cell_eov"), "batch_00001.parquet"))))
+  expect_true(all(file.exists(file.path(fx$dir, c("totals", "cell_eov"), "batch_00002.parquet"))))
+  expect_false(any(c("clip_b", "tot_b", "rng_b") %in% DBI::dbListTables(con)))
 })
 
-test_that("share sql (a): range clip keeps only cells inside the range, exact shares", {
+test_that("batch sql (a): range clip keeps only cells inside the range, exact shares", {
   con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
-  share_fixture(con)
-  s <- DBI::dbGetQuery(con, "SELECT * FROM eov_sp_share WHERE aphia_id = 101 ORDER BY cell_id")
-  expect_equal(s$cell_id, 2:4)                                # c1 outside the range dropped
-  expect_equal(s$share, c(40, 30, 160) / 230)                 # u*A = 20*2, 30*1, 40*4
+  fx <- share_fixture(con)
+  # species A alone: fish partial restricted to A through the weights (B DD, D excluded)
+  ce <- DBI::dbGetQuery(con, "SELECT * FROM eov_cell_eov WHERE eov = 'fish' ORDER BY cell_id")
+  expect_equal(ce$cell_id[ce$cell_id %in% 2:4], 2:4)              # c1 of A clipped out
+  a_share <- ce$share[ce$cell_id %in% 2:4]
+  expect_equal(a_share, c(40, 30, 160) / 230)                     # u*A = 20*2, 30*1, 40*4
   t <- DBI::dbGetQuery(con, "SELECT * FROM eov_sp_total WHERE aphia_id = 101")
   expect_equal(t$total_suit_area, 230)
   expect_equal(t$n_cells, 3)
   expect_true(t$has_range); expect_false(t$excluded)
 })
 
-test_that("share sql (b): species without range uses the full distribution", {
+test_that("batch sql (b): species without range uses the full distribution", {
   con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
   share_fixture(con)
-  s <- DBI::dbGetQuery(con, "SELECT * FROM eov_sp_share WHERE aphia_id = 102 ORDER BY cell_id")
-  expect_equal(s$cell_id, c(1L, 5L, 6L))
-  expect_equal(s$share, c(50, 100, 100) / 250)
   t <- DBI::dbGetQuery(con, "SELECT * FROM eov_sp_total WHERE aphia_id = 102")
+  expect_equal(t$total_suit_area, 250)                            # 50*1 + 50*2 + 100*1
+  expect_equal(t$n_cells, 3)
   expect_false(t$has_range)
+  ce <- DBI::dbGetQuery(con, "SELECT * FROM eov_cell_eov WHERE eov = 'fish' ORDER BY cell_id")
+  expect_equal(ce$share[ce$cell_id %in% c(5L, 6L)], c(.4, .4))
 })
 
-test_that("share sql (c): two models on an overlapping cell take the max", {
+test_that("batch sql (c): two models on an overlapping cell take the max", {
   con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
   share_fixture(con)
-  v <- DBI::dbGetQuery(con, "SELECT * FROM eov_sp_cell WHERE aphia_id = 103 ORDER BY cell_id")
-  expect_equal(v$v, c(10, 60, 20))                            # c2: max(30, 60)
-  s <- DBI::dbGetQuery(con, "SELECT * FROM eov_sp_share WHERE aphia_id = 103 ORDER BY cell_id")
-  expect_equal(s$share, c(10, 120, 20) / 150)
-  expect_equal(DBI::dbGetQuery(con, "SELECT n_models FROM eov_sp_total WHERE aphia_id = 103")$n_models, 2)
+  t <- DBI::dbGetQuery(con, "SELECT * FROM eov_sp_total WHERE aphia_id = 103")
+  expect_equal(t$total_suit_area, 150)                            # max 10, 60, 20 times 1, 2, 1
+  expect_equal(t$n_models, 2)
+  ce <- DBI::dbGetQuery(con, "SELECT * FROM eov_cell_eov WHERE eov = 'hardCorals' ORDER BY cell_id")
+  expect_equal(ce$share, c(10, 120, 20) / 150)                    # c2: max(30, 60)
 })
 
-test_that("share sql (d): species whose cells never overlap its range is excluded", {
+test_that("batch sql (d): species whose cells never overlap its range is excluded", {
   con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
   share_fixture(con)
   t <- DBI::dbGetQuery(con, "SELECT * FROM eov_sp_total WHERE aphia_id = 104")
   expect_equal(t$total_suit_area, 0)
   expect_equal(t$n_cells, 0)
   expect_true(t$excluded)
-  expect_equal(DBI::dbGetQuery(con, "SELECT count(*) n FROM eov_sp_share WHERE aphia_id = 104")$n, 0)
-  # every non-excluded species shares sum to 1
-  sums <- DBI::dbGetQuery(con, "SELECT aphia_id, sum(share) s FROM eov_sp_share GROUP BY 1 ORDER BY 1")
-  expect_equal(sums$aphia_id, 101:103)
-  expect_equal(sums$s, rep(1, 3))
+  # excluded species adds nothing: fish cells 5, 6 hold B only
+  ce <- DBI::dbGetQuery(con, "SELECT * FROM eov_cell_eov WHERE eov = 'fish' ORDER BY cell_id")
+  expect_equal(ce$share[ce$cell_id %in% 5:6], c(.4, .4))
 })
 
-test_that("share sql: per cell x EOV share and risk, NULL weight excluded from risk only", {
+test_that("batch sql: per cell x EOV share and risk, NULL weight excluded from risk only", {
   con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
   share_fixture(con)
   ce <- DBI::dbGetQuery(con, "SELECT * FROM eov_cell_eov ORDER BY eov, cell_id")
   fish <- ce[ce$eov == "fish", ]
   hc   <- ce[ce$eov == "hardCorals", ]
   expect_equal(fish$cell_id, c(1L, 2L, 3L, 4L, 5L, 6L))
-  # share: B (c1, c5, c6) + A (c2-c4); D contributes nothing
   expect_equal(fish$share, c(.2, 40/230, 30/230, 160/230, .4, .4))
-  # risk: only A (VU .4) is weighted; B is DD (NULL) so c1, c5, c6 are 0, not NA
   expect_equal(fish$risk, c(0, .4 * 40/230, .4 * 30/230, .4 * 160/230, 0, 0))
   expect_false(anyNA(fish$risk))
   expect_equal(hc$cell_id, 1:3)
   expect_equal(hc$share, c(10, 120, 20) / 150)
   expect_equal(hc$risk, .8 * c(10, 120, 20) / 150)
-  # the EOV totals: one unit of share per included species
   expect_equal(sum(fish$share), 2)
   expect_equal(sum(hc$share), 1)
   expect_equal(sum(fish$risk), 0.4)
+  tot <- DBI::dbGetQuery(con, "SELECT aphia_id, excluded FROM eov_sp_total ORDER BY aphia_id")
+  expect_equal(tot$excluded, c(FALSE, FALSE, FALSE, TRUE))
 })
 
+test_that("batch sql: a species in two EOVs counts once per EOV batch; no totals row means excluded", {
+  con <- new_con(); on.exit(DBI::dbDisconnect(con, shutdown = T))
+  share_fixture(con)
+  # species 102 also in hardCorals: the eov argument keeps each batch to its own EOV
+  DBI::dbWriteTable(con, "eov2", data.frame(eov = c("fish", "other"), aphia_id = c(102L, 102L)))
+  dir <- tempfile(); dir.create(file.path(dir, "totals"), recursive = T)
+  dir.create(file.path(dir, "cell_eov"))
+  am <- tempfile(fileext = ".parquet")
+  DBI::dbExecute(con, glue::glue("COPY (SELECT 'am|B' AS mdl_key, 1 AS cell_id, 50.0 AS val) TO '{am}' (FORMAT parquet)"))
+  st <- eov_batch_sql(1L, am, character(), FALSE, "map", "area", "wt", "eov2", dir, "rng_map", eov = "fish")
+  for (s in st) DBI::dbExecute(con, s)
+  out <- DBI::dbGetQuery(con, glue::glue("SELECT * FROM read_parquet('{dir}/cell_eov/*.parquet')"))
+  expect_equal(out$eov, "fish")
+  expect_equal(out$share, 1)
+  # a species of the map that no batch processed has no totals row
+  m <- eov_merge_sql(dir, "map")
+  DBI::dbExecute(con, m$sp_total)
+  t <- DBI::dbGetQuery(con, "SELECT * FROM eov_sp_total ORDER BY aphia_id")
+  expect_equal(t$excluded, c(TRUE, FALSE, TRUE, TRUE))
+  expect_equal(t$n_cells, c(0, 1, 0, 0))
+})
+
+test_that("batches: never split a species, never mix EOVs, respect the cap, oversize alone", {
+  sp <- data.frame(
+    eov      = c("fish", "fish", "fish", "fish", "fish", "corals", "corals", "corals"),
+    aphia_id = c(5L, 1L, 2L, 3L, 4L, 11L, 10L, 12L),
+    n_rows   = c(30, 40, 50, 500, 20, 10, 10, 10))
+  b <- eov_make_batches(sp, max_rows = 100)
+  expect_equal(nrow(b), nrow(sp))
+  expect_equal(b$eov, c(rep("corals", 3), rep("fish", 5)))          # ordered by eov, aphia_id
+  expect_equal(b$aphia_id[b$eov == "fish"], 1:5)
+  # no species is split across batches; each batch has a single EOV
+  expect_false(anyDuplicated(b$aphia_id[b$eov == "fish"]) > 0)
+  expect_true(all(tapply(b$eov, b$batch_id, \(x) length(unique(x))) == 1))
+  tot <- tapply(b$n_rows, b$batch_id, sum)
+  big <- b$batch_id[b$aphia_id == 3 & b$eov == "fish"]
+  expect_equal(unname(tot[as.character(big)]), 500)                  # oversized species alone
+  expect_true(all(tot[names(tot) != as.character(big)] <= 100))
+  expect_equal(b$batch_id, c(1, 1, 1, 2, 2, 3, 4, 4))                # corals | 40+50 | 500 | 20+30
+})
 # score ----
 test_that("score: 100 * min(1, d / q99), q99 over the positive values", {
   d  <- c(0, 1:100, NA)

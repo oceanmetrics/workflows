@@ -5,7 +5,7 @@ graph LR
     spp[("spp.duckdb<br/>worms, iucn_redlist")]:::source
     sdm[("v9/sdm.duckdb<br/>cell, taxon")]:::source
     reg["v9 registry/taxon_model.parquet"]:::source
-    part["v9 dist/dataset=am/#42;.parquet<br/>dist/dataset=rng_iucn/#42;.parquet"]:::source
+    parts["v9 dist/dataset=am<br/>dist/dataset=rng_iucn<br/>(one parquet per model)"]:::source
     tpl["r_cellid_global.tif"]:::source
   end
 
@@ -14,9 +14,11 @@ graph LR
     mapt["am model map<br/>range map, Red List<br/>weights"]:::step
   end
 
-  subgraph dist[Chunk: distributions - checkpointed]
-    spt[("eov_sp_total<br/>eov_sp_map")]:::artifact
-    ce[("eov_cell_eov<br/>share, risk")]:::artifact
+  subgraph dist[Chunk: distributions - batched, restartable]
+    bat["batches: species by EOV x row cap<br/>never split, never mixed"]:::step
+    perb["per batch<br/>rng_b - clip_b - tot_b"]:::step
+    part[("partials/totals/batch_N.parquet<br/>partials/cell_eov/batch_N.parquet<br/>both files = batch done")]:::artifact
+    ce[("eov_sp_total<br/>eov_cell_eov<br/>share, risk")]:::artifact
   end
 
   subgraph agg[Chunk: aggregate]
@@ -24,10 +26,10 @@ graph LR
   end
 
   subgraph out[Chunk: outputs - staging dir]
-    cog["score_#42;.tif (Byte)<br/>density_#42;.tif (Float32)"]:::artifact
-    pq["cells/eov=#42;/data.parquet<br/>h3_r5.parquet<br/>eov_taxa.parquet"]:::artifact
+    cog["score_[risk,share].tif (Byte)<br/>density_[risk,share].tif (Float32)"]:::artifact
+    pq["cells/eov=[g]/data.parquet<br/>h3_r5.parquet<br/>eov_taxa.parquet"]:::artifact
     meta["eov_summary.csv<br/>method.json<br/>provenance.json<br/>README.md, AGENTS.md"]:::artifact
-    stac["collection.json<br/>items/#42;.json (16)"]:::artifact
+    stac["collection.json<br/>items/[eov]_[metric].json (16)"]:::artifact
   end
 
   ver["Chunk: verify_stac<br/>EOV_VERIFY_N species<br/>COG vs partition"]:::step
@@ -36,11 +38,10 @@ graph LR
 
   spp --> tree --> mapt
   reg --> mapt
-  sdm --> spt
-  mapt --> spt
-  part --> spt
-  spt --> ce
-  part --> ce
+  mapt --> bat --> perb
+  sdm --> perb
+  parts --> perb
+  perb --> part --> ce
   ce --> sc
   sdm --> sc
   tpl --> cog
@@ -48,11 +49,11 @@ graph LR
   cog --> stac
   pq --> stac
   meta --> stac
-  part -.-> ver
+  parts -.-> ver
   ver -.-> stac
   stac --> up --> s3
 
-  flags["EOV_REDO, EOV_TEST_N, EOV_WEIGHTS, EOV_Q,<br/>EOV_VERIFY_N, EOV_S3,<br/>MSENS_DERIVED, BUILD_MEMORY_GB, BUILD_THREADS"]:::note
+  flags["EOV_REDO, EOV_TEST_N, EOV_BATCH_ROWS,<br/>EOV_WEIGHTS, EOV_Q, EOV_VERIFY_N, EOV_S3,<br/>MSENS_DERIVED, BUILD_MEMORY_GB, BUILD_THREADS, BUILD_TMP_GB"]:::note
   flags ~~~ in
 
   classDef source   fill:#f5f0e6,stroke:#8a8272,color:#182b49

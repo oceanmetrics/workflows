@@ -39,6 +39,7 @@ verify_n  <- as.integer(Sys.getenv("EOV_VERIFY_N", "20"))
 mem_gb    <- as.integer(Sys.getenv("BUILD_MEMORY_GB", "12"))
 n_threads <- as.integer(Sys.getenv("BUILD_THREADS", "8"))
 tmp_gb    <- as.integer(Sys.getenv("BUILD_TMP_GB", "100"))
+batch_rows <- as.numeric(Sys.getenv("EOV_BATCH_ROWS", "80e6"))
 stopifnot(scheme %in% c("ohi", "mst_v1"), q_score > 0, q_score <= 1)
 
 seeds     <- eov_seeds()
@@ -247,9 +248,10 @@ seeds |>
 # Pipeline {#sec-pipeline}
 
 The chunks below read the inputs, run the rules of `R/eov_share.R` in DuckDB, write the product to
-a staging directory and, only when asked, upload it (@fig-pipeline). The two long DuckDB passes
-(species totals and the cell by EOV aggregation) are written as tables into a DuckDB file and
-checkpointed, so a re-render reuses them unless `EOV_REDO=1`.
+a staging directory and, only when asked, upload it (@fig-pipeline). The long DuckDB pass over the
+AquaMaps rows runs in batches of species (`EOV_BATCH_ROWS`, default 80 million rows per batch); each
+batch writes small partial files (`partials/totals` and `partials/cell_eov`), which are the
+checkpoint: a re-render skips finished batches and `EOV_REDO=1` recomputes them.
 
 ![Pipeline: the chunks of this notebook, the tables and files they make, and the environment flags.](diagrams/eov_pipeline.svg){#fig-pipeline .cc-diagram .nolightbox}
 
@@ -303,10 +305,11 @@ if (redo || !identical(old, prm)) {
 
 tibble(
   setting = c("version", "mode", "weights", "score quantile", "verify species", "upload",
-              "memory", "threads", "staging dir", "inputs"),
+              "memory", "threads", "rows per batch", "staging dir", "inputs"),
   value   = c(ver, if (is_test) glue("test: first {test_n} species per EOV") else "full run",
               scheme, q_score, verify_n, if (do_s3) "EOV_S3=1" else "off",
-              glue("{mem_gb} GB"), n_threads, dir_out, dir_derived)) |>
+              glue("{mem_gb} GB"), n_threads, format(batch_rows, big.mark = ",", scientific = F),
+              dir_out, dir_derived)) |>
   kable()
 ```
 
@@ -340,38 +343,60 @@ run(glue("
           FROM eov_tree t JOIN eov_am_map0 m ON m.aphia_id = t.taxonID))
   {rn_where}"))
 
-# models with a partition file on disk ----
-am_map <- dbGetQuery(con, "
-  SELECT mdl_key, aphia_id FROM eov_am_map0
-  WHERE aphia_id IN (SELECT aphia_id FROM eov_member)") |>
-  mutate(file = file.path(p$dist_am, paste0(sub("^am\\|", "", mdl_key), ".parquet"))) |>
-  filter(file.exists(file))
-dbWriteTable(con, "eov_am_map", select(am_map, mdl_key, aphia_id), overwrite = T)
-
 # IUCN range models of the same species ----
 rng_map <- dbGetQuery(con, glue("
   SELECT mdl_key, CAST(taxon_id AS BIGINT) AS aphia_id
   FROM read_parquet('{p$taxon_model}')
   WHERE ds_key = 'rng_iucn' AND taxon_authority = 'worms'
     AND CAST(taxon_id AS BIGINT) IN (SELECT aphia_id FROM eov_member)")) |>
-  mutate(file = file.path(p$dist_rng, paste0(sub("^rng_iucn\\|", "", mdl_key), ".parquet"))) |>
+  mutate(aphia_id = as.integer(aphia_id),
+         file = file.path(p$dist_rng, paste0(sub("^rng_iucn\\|", "", mdl_key), ".parquet"))) |>
   filter(file.exists(file))
 dbWriteTable(con, "eov_rng_map", select(rng_map, mdl_key, aphia_id), overwrite = T)
 
-# range footprint (aphia_id, cell_id): read once, checkpointed ----
-if (!tbl_exists("eov_rng")) {
-  if (nrow(rng_map) > 0) {
-    f_rng <- paste0("'", rng_map$file, "'", collapse = ", ")
-    run(glue("
-      CREATE TABLE eov_rng AS
-      SELECT DISTINCT m.aphia_id, r.cell_id
-      FROM read_parquet([{f_rng}], hive_partitioning = false) r
-      JOIN eov_rng_map m ON m.mdl_key = r.mdl_key"))
-  } else {
-    run("CREATE TABLE eov_rng (aphia_id BIGINT, cell_id INTEGER)")
-  }
-  run("CHECKPOINT")
+# AquaMaps models with a partition file on disk, with n_models and has_range ----
+am_map <- dbGetQuery(con, "
+  SELECT mdl_key, aphia_id FROM eov_am_map0
+  WHERE aphia_id IN (SELECT aphia_id FROM eov_member)") |>
+  mutate(aphia_id = as.integer(aphia_id),
+         file = file.path(p$dist_am, paste0(sub("^am\\|", "", mdl_key), ".parquet"))) |>
+  filter(file.exists(file)) |>
+  group_by(aphia_id) |>
+  mutate(n_models = n()) |>
+  ungroup() |>
+  mutate(has_range = aphia_id %in% rng_map$aphia_id)
+dbWriteTable(con, "eov_am_map", select(am_map, mdl_key, aphia_id, n_models, has_range), overwrite = T)
+run("DROP TABLE IF EXISTS eov_rng")      # the global range footprint of earlier versions
+
+# rows per file from the parquet footers (seconds, no data read) ----
+n_rows_of <- function(files) {
+  if (length(files) == 0) return(tibble(file = character(), n = numeric()))
+  dbGetQuery(con, glue("
+    SELECT file_name AS file, sum(num_rows)::DOUBLE AS n
+    FROM parquet_file_metadata([{paste0(\"'\", files, \"'\", collapse = ', ')}])
+    GROUP BY 1"))
 }
+am_map  <- am_map  |> left_join(n_rows_of(am_map$file),  by = "file") |> rename(n_rows = n)
+rng_map <- rng_map |> left_join(n_rows_of(rng_map$file), by = "file") |> rename(n_rows = n)
+
+# batches: species by EOV x row cap, never split, never mixing EOVs ----
+sp_rows <- bind_rows(am_map, rng_map) |>
+  group_by(aphia_id) |>
+  summarize(n_rows = sum(n_rows), .groups = "drop")
+members <- dbGetQuery(con, "SELECT eov, aphia_id FROM eov_member") |>
+  mutate(aphia_id = as.integer(aphia_id)) |>
+  left_join(sp_rows, by = "aphia_id") |>
+  mutate(n_rows = coalesce(n_rows, 0))
+sp_batch <- eov_make_batches(members, batch_rows)
+batches <- sp_batch |>
+  group_by(batch_id, eov) |>
+  summarize(
+    n_species = n(),
+    n_rows    = sum(n_rows),
+    has_multi = any(aphia_id %in% am_map$aphia_id[am_map$n_models > 1]),
+    am_files  = list(am_map$file[am_map$aphia_id %in% aphia_id]),
+    rng_files = list(rng_map$file[rng_map$aphia_id %in% aphia_id]),
+    .groups = "drop")
 
 # Red List category: snapshot by accepted name, then MST v9 taxon table ----
 run("
@@ -427,34 +452,72 @@ back them. The grid has `r format(n_cells_total, big.mark = ",")` ocean cells.
 
 ## Distributions {#sec-distributions}
 
-`eov_share_sql()` writes the species-level statements: the species total
-$\sum_c u_{s,c}A_c$ (a table, checkpointed) and the species share (a view, evaluated inside the
-cell aggregation so that the billions of species by cell rows are never stored). Only the partition
-files of the needed models are read.
+The AquaMaps rows are read once, in batches of species (`eov_make_batches()`): species are ordered
+by EOV and AphiaID and filled up to `EOV_BATCH_ROWS` rows (AquaMaps plus range rows), a batch never
+splits a species and never mixes EOVs, and a species above the cap gets a batch of its own
+(@tbl-batches). For each batch `eov_batch_sql()` builds the range footprint of the batch's species,
+takes the maximum over a species' models, clips to the footprint, and writes two small partial files:
+the species totals $\sum_c u_{s,c}A_c$ and the per cell and EOV `share` and `risk`. A batch whose two
+partial files exist is skipped, which makes the run restartable (`EOV_REDO=1` deletes the partials).
+`eov_merge_sql()` then sums the partials into `eov_sp_total` and `eov_cell_eov`. Memory and disk
+use are bounded by the batch size, not by the number of species or the size of the ranges.
+
+```{r}
+#| label: tbl-batches
+#| tbl-cap: "Batches of species (EOV x row cap): number of batches and the distribution of rows (AquaMaps plus range) per batch."
+
+kable(tibble(
+  `EOV batches` = nrow(batches),
+  species       = sum(batches$n_species),
+  `rows cap`    = format(batch_rows, big.mark = ",", scientific = F),
+  `rows min`    = format(min(batches$n_rows), big.mark = ",", scientific = F),
+  `rows median` = format(median(batches$n_rows), big.mark = ",", scientific = F),
+  `rows q90`    = format(quantile(batches$n_rows, 0.9), big.mark = ",", scientific = F),
+  `rows max`    = format(max(batches$n_rows), big.mark = ",", scientific = F)))
+```
 
 ```{r}
 #| label: distributions
 
-f_am   <- paste0("'", am_map$file, "'", collapse = ", ")
-am_src <- glue("read_parquet([{f_am}], hive_partitioning = false)")
-sql    <- eov_share_sql(
-  am_tbl = am_src, map_tbl = "eov_am_map", rng_tbl = "eov_rng", area_tbl = "eov_cell",
-  eov_tbl = "eov_member", weight_tbl = "eov_weight", out_prefix = "eov_")
+# partial files are valid only for the parameters that made them ----
+dir_part <- file.path(dir_work, glue("partials_{scheme}_n{test_n}_b{format(batch_rows, scientific = F)}"))
+if (redo) unlink(dir_part, recursive = T)
+for (d in file.path(dir_part, c("totals", "cell_eov"))) dir.create(d, showWarnings = F, recursive = T)
+f_log <- file.path(dir_work, "batch_log.csv")
 
-# tables are checkpoints, views are always (re)defined ----
-ckpt  <- c(sp_map = "eov_sp_map", sp_total = "eov_sp_total", cell_eov = "eov_cell_eov")
-times <- list()
-for (nm in names(sql)) {
-  tb <- ckpt[nm]
-  if (!is.na(tb) && tbl_exists(tb)) { times[[nm]] <- NA_real_; next }
-  t0 <- Sys.time()
-  run(sql[[nm]])
-  if (!is.na(tb)) run("CHECKPOINT")
-  times[[nm]] <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+# one pass over the batches; a batch with both partial files is done ----
+blog <- list()
+t_all <- Sys.time()
+for (i in seq_len(nrow(batches))) {
+  b   <- batches[i, ]
+  fs  <- file.path(dir_part, c("totals", "cell_eov"), sprintf("batch_%05d.parquet", b$batch_id))
+  if (all(file.exists(fs))) { blog[[i]] <- tibble(batch_id = b$batch_id, seconds = NA_real_); next }
+  t0  <- Sys.time()
+  st  <- eov_batch_sql(
+    batch_id = b$batch_id, am_files = b$am_files[[1]], rng_files = b$rng_files[[1]],
+    has_multi = b$has_multi, map_tbl = "eov_am_map", area_tbl = "eov_cell",
+    weight_tbl = "eov_weight", eov_tbl = "eov_member", dir_partials = dir_part,
+    rng_map_tbl = "eov_rng_map", eov = b$eov)
+  for (s_ in st) run(s_)
+  blog[[i]] <- tibble(batch_id = b$batch_id, seconds = as.numeric(difftime(Sys.time(), t0, units = "secs")))
+  if (i %% 10 == 0 || i == nrow(batches)) {
+    cat(glue("batch {i}/{nrow(batches)}: {round(blog[[i]]$seconds, 1)} s, ",
+             "{round(as.numeric(difftime(Sys.time(), t_all, units = 'mins')), 1)} min elapsed\n"),
+        file = stderr())
+  }
+  write_csv(bind_rows(blog), f_log)
 }
-step_times <- tibble(step = names(times), seconds = unlist(times))
+batch_log <- bind_rows(blog)
+write_csv(batch_log, f_log)
+
+# merge the partials ----
+for (s_ in eov_merge_sql(dir_part, "eov_am_map")) run(s_)
 n_sp_total <- dbGetQuery(con, "SELECT count(*) AS n, sum(excluded::INT) AS n_excl FROM eov_sp_total")
-kable(step_times, digits = 1, caption = "Seconds per statement (NA: reused checkpoint).")
+kable(tibble(
+  batches = nrow(batch_log), computed = sum(!is.na(batch_log$seconds)),
+  `seconds total` = sum(batch_log$seconds, na.rm = T),
+  `seconds per batch` = mean(batch_log$seconds, na.rm = T)), digits = 1,
+  caption = "Batches computed in this render (the others reused their partial files).")
 ```
 
 The species table has `r n_sp_total$n` species, of which `r n_sp_total$n_excl` are excluded because
@@ -582,7 +645,7 @@ run("
   CREATE OR REPLACE TABLE eov_taxa AS
   SELECT m.aphia_id, rl.scientific_name, m.eov,
          (SELECT string_agg(replace(mm.mdl_key, 'am|', ''), ';' ORDER BY mm.mdl_key)
-          FROM eov_sp_map mm WHERE mm.aphia_id = m.aphia_id) AS sp_keys,
+          FROM eov_am_map mm WHERE mm.aphia_id = m.aphia_id) AS sp_keys,
          coalesce(t.n_models, 0)::INTEGER AS n_models,
          coalesce(t.has_range, false) AS has_range,
          (SELECT count(*) FROM eov_rng_map rm WHERE rm.aphia_id = m.aphia_id)::INTEGER AS n_range_ids,
@@ -655,7 +718,9 @@ method <- list(
                     share = "u * area_km2 / sum(u * area_km2) over the global distribution",
                     density = "value / area_km2", reportable = "any taxon of the EOV present in the cell",
                     composite = "equal-weight mean of the reportable EOV scores",
-                    h3_resolution = 5L),
+                    h3_resolution = 5L,
+                    batch_rows = batch_rows,
+                    batching = "species by EOV x row cap; partial files totals/ and cell_eov/ per batch, summed at the end"),
   method_detail = eov_method_detail(scheme, q_score),
   weights = list(ohi = eov_weights_table("ohi"), mst_v1 = eov_weights_table("mst_v1")),
   redlist_precedence = c("spp.duckdb:iucn_redlist (latest, by lower(accepted scientificName))",
@@ -1015,7 +1080,7 @@ EOV_S3=1 quarto render aquamaps_eov.qmd               # also upload (the only si
 ```
 
 Flags: `EOV_REDO`, `EOV_S3`, `EOV_TEST_N`, `EOV_WEIGHTS` (`ohi` or `mst_v1`), `EOV_Q` (score
-quantile), `EOV_VERIFY_N` (COG spot-check, 0 to skip), `MSENS_DERIVED`, `BUILD_MEMORY_GB`,
+quantile), `EOV_BATCH_ROWS` (rows per batch), `EOV_VERIFY_N` (COG spot-check, 0 to skip), `MSENS_DERIVED`, `BUILD_MEMORY_GB`,
 `BUILD_THREADS`, `BUILD_TMP_GB` (cap on DuckDB spill files, default 100). The rules live in `R/eov_share.R` and are guarded by `tests/testthat`
 (`Rscript -e 'testthat::test_dir("tests/testthat")'`).
 
