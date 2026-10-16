@@ -821,7 +821,7 @@ eov_cell_species_field <- function() {
     group_dimension = "eov",
     share = list(
       total_column = "total_suit_area",
-      formula      = "suit/100 * area_km2(lat) / total_suit_area"),
+      formula      = "suit * area_km2(lat) / total_suit_area"),
     links = list(
       list(label = "Atlas", href_template = "?c=aquamaps_native&sp={sp_key}", same_app = TRUE),
       list(label = "WoRMS", column = "worms_url"),

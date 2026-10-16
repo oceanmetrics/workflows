@@ -629,6 +629,7 @@ test_that("stac: atlas:cell_species field only when asked, verbatim contract", {
   expect_equal(as.numeric(cs$value_range), c(1, 100))
   expect_equal(c(cs$group_column, cs$group_dimension), c("eov", "eov"))
   expect_equal(cs$share$total_column, "total_suit_area")
+  expect_equal(cs$share$formula, "suit * area_km2(lat) / total_suit_area")
   expect_equal(vapply(cs$links, `[[`, "", "label"), c("Atlas", "WoRMS", "IUCN", "AquaMaps"))
   expect_true(cs$links[[1]]$same_app)
   f <- tempfile(fileext = ".json"); write_stac_json(stac_collection_eov(cell_species = TRUE), f)
