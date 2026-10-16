@@ -1,0 +1,32 @@
+/* the pan-and-zoom diagram viewer (libs/diagram.js) */
+.cc-diagram-wrap {
+  position: relative;
+  width: 100%;
+  border: 1px solid var(--bs-border-color, #dddddd);
+  border-radius: 8px;
+  background: var(--bs-body-bg, #ffffff);
+  overflow: hidden;
+  cursor: grab;
+}
+.cc-diagram-wrap:active { cursor: grabbing; }
+.cc-diagram-wrap svg { display: block; }
+/* top-LEFT: quarto's anchor link (.anchorjs-link, the chain icon on hover) owns the
+   figure's top-right corner, and the two collided there */
+.cc-diagram-wrap .cc-diagram-full {
+  position: absolute; top: 0.4rem; left: 0.4rem;
+  width: 2rem; height: 2rem; line-height: 1.8rem; font-size: 1.1rem;
+  border: 1px solid var(--bs-border-color, #dddddd); border-radius: 6px;
+  background: var(--bs-body-bg, #ffffff); color: var(--bs-body-color, #182b49);
+  cursor: pointer; opacity: 0.85;
+}
+.cc-diagram-wrap .cc-diagram-full:hover { opacity: 1; }
+/* svg-pan-zoom's own control icons sit bottom-right; give them the page's colours */
+.cc-diagram-wrap #svg-pan-zoom-controls, .cc-diagram-wrap .svg-pan-zoom-control { opacity: 0.85; }
+.cc-diagram-wrap.is-full {
+  position: fixed; inset: 0; z-index: 2000;
+  height: 100vh !important; width: 100vw;
+  border: 0; border-radius: 0;
+}
+body.cc-diagram-open { overflow: hidden; }
+/* below the reading width the inline viewer is shorter */
+@media (max-width: 767px) { .cc-diagram-wrap { height: 380px !important; } }

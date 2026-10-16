@@ -1,0 +1,67 @@
+graph LR
+  %% the chunks of aquamaps_eov.qmd, the tables and files they make, and the env flags.
+
+  subgraph in[Inputs, read only]
+    spp[("spp.duckdb<br/>worms, iucn_redlist")]:::source
+    sdm[("v9/sdm.duckdb<br/>cell, taxon")]:::source
+    reg["v9 registry/taxon_model.parquet"]:::source
+    part["v9 dist/dataset=am/#42;.parquet<br/>dist/dataset=rng_iucn/#42;.parquet"]:::source
+    tpl["r_cellid_global.tif"]:::source
+  end
+
+  subgraph taxa[Chunk: taxa]
+    tree["eov_tree_sql<br/>EOV x AphiaID"]:::step
+    mapt["am model map<br/>range map, Red List<br/>weights"]:::step
+  end
+
+  subgraph dist[Chunk: distributions - checkpointed]
+    spt[("eov_sp_total<br/>eov_sp_map")]:::artifact
+    ce[("eov_cell_eov<br/>share, risk")]:::artifact
+  end
+
+  subgraph agg[Chunk: aggregate]
+    sc["densities, q99<br/>scores, composite, n_eov"]:::step
+  end
+
+  subgraph out[Chunk: outputs - staging dir]
+    cog["score_#42;.tif (Byte)<br/>density_#42;.tif (Float32)"]:::artifact
+    pq["cells/eov=#42;/data.parquet<br/>h3_r5.parquet<br/>eov_taxa.parquet"]:::artifact
+    meta["eov_summary.csv<br/>method.json<br/>provenance.json<br/>README.md, AGENTS.md"]:::artifact
+    stac["collection.json<br/>items/#42;.json (16)"]:::artifact
+  end
+
+  ver["Chunk: verify_stac<br/>EOV_VERIFY_N species<br/>COG vs partition"]:::step
+  up["Chunk: upload<br/>aws s3 sync --delete<br/>EOV_S3=1 only"]:::surface
+  s3[("s3://oceanmetrics.io-public<br/>/atlas/aquamaps_eov/")]:::surface
+
+  spp --> tree --> mapt
+  reg --> mapt
+  sdm --> spt
+  mapt --> spt
+  part --> spt
+  spt --> ce
+  part --> ce
+  ce --> sc
+  sdm --> sc
+  tpl --> cog
+  sc --> cog & pq & meta
+  cog --> stac
+  pq --> stac
+  meta --> stac
+  part -.-> ver
+  ver -.-> stac
+  stac --> up --> s3
+
+  flags["EOV_REDO, EOV_TEST_N, EOV_WEIGHTS, EOV_Q,<br/>EOV_VERIFY_N, EOV_S3,<br/>MSENS_DERIVED, BUILD_MEMORY_GB, BUILD_THREADS"]:::note
+  flags ~~~ in
+
+  classDef source   fill:#f5f0e6,stroke:#8a8272,color:#182b49
+  classDef step     fill:#fff7d6,stroke:#c9a227,color:#182b49
+  classDef artifact fill:#fbe9c9,stroke:#d97706,color:#182b49
+  classDef surface  fill:#e6f2fb,stroke:#00629b,color:#182b49
+  classDef note     fill:#ffffff,stroke:#cfd6de,color:#52607a,stroke-dasharray:4 3
+  style in    fill:#fafafa,stroke:#cfd6de
+  style taxa  fill:#fafafa,stroke:#cfd6de
+  style dist  fill:#fafafa,stroke:#cfd6de
+  style agg   fill:#fafafa,stroke:#cfd6de
+  style out   fill:#fafafa,stroke:#cfd6de

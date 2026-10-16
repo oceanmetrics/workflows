@@ -1,0 +1,53 @@
+graph LR
+  %% the AquaMaps EOV share framework: which inputs meet where, and who consumes the product.
+  %% WoRMS AphiaID is the join key shared with obis-hex / obisindicators.
+
+  subgraph taxa[Taxa: the join key]
+    mldn["IOOS MLDN EOV seeds<br/>33 WoRMS AphiaIDs, 7 EOVs<br/>via obisindicators 0.8.0"]:::source
+    worms["WoRMS 2026-07-01<br/>subtree of each seed<br/>parentNameUsageID"]:::source
+    eovtaxa["EOV taxa<br/>AphiaID x EOV"]:::artifact
+  end
+
+  subgraph dist[Distribution: MarineSensitivity v9]
+    am["AquaMaps suitability 1-100<br/>global 0.05 degree grid<br/>max over a species' models"]:::source
+    rng["IUCN range footprint<br/>(when the species has one)"]:::source
+    clip["clipped distribution u<br/>full distribution if no range"]:::step
+    share["species share<br/>u x cell area / sum"]:::step
+  end
+
+  subgraph risk[Extinction risk]
+    rl["IUCN Red List 2025<br/>category per species"]:::source
+    w["Butchart / OHI weight<br/>LC 0 ... CR 0.8, EX 1<br/>DD excluded"]:::step
+  end
+
+  cellg["per cell x EOV<br/>share = sum share<br/>risk = sum weight x share"]:::step
+  score["score 0-100<br/>density / q99 per EOV<br/>composite = mean of EOVs"]:::step
+  stac["STAC collection aquamaps_eov<br/>COGs + parquet + method.json<br/>CC BY-NC 3.0"]:::artifact
+
+  subgraph use[Consumers]
+    atlas["OceanMetrics atlas<br/>default layer + flower plot<br/>on cell click"]:::surface
+    other["R / Python / DuckDB<br/>rstac, pystac, rasterio"]:::surface
+    xw["obis-hex, obisindicators,<br/>MarineSensitivity<br/>(eov_taxa.parquet)"]:::surface
+  end
+
+  mldn --> worms --> eovtaxa
+  am --> clip
+  rng --> clip
+  clip --> share
+  rl --> w
+  eovtaxa --> cellg
+  share --> cellg
+  w --> cellg
+  cellg --> score --> stac
+  stac --> atlas & other
+  eovtaxa -. "AphiaID crosswalk" .-> stac
+  stac -.-> xw
+
+  classDef source   fill:#f5f0e6,stroke:#8a8272,color:#182b49
+  classDef step     fill:#fff7d6,stroke:#c9a227,color:#182b49
+  classDef artifact fill:#fbe9c9,stroke:#d97706,color:#182b49
+  classDef surface  fill:#e6f2fb,stroke:#00629b,color:#182b49
+  style taxa fill:#fafafa,stroke:#cfd6de
+  style dist fill:#fafafa,stroke:#cfd6de
+  style risk fill:#fafafa,stroke:#cfd6de
+  style use  fill:#fafafa,stroke:#cfd6de

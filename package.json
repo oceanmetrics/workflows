@@ -1,0 +1,12 @@
+{
+  "name": "oceanmetrics-workflows",
+  "private": true,
+  "description": "diagram tooling for the notebooks: mermaid-cli pre-renders diagrams/*.mmd to svg, svg-pan-zoom is the viewer",
+  "scripts": {
+    "diagrams": "libs/render_diagrams.sh"
+  },
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "11.12.0",
+    "svg-pan-zoom": "^3.6.1"
+  }
+}
