@@ -329,14 +329,14 @@ run(glue("
   WHERE ds_key = 'am' AND taxon_authority = 'worms'"))
 
 # test mode keeps the first N species per EOV ----
-rn_max <- if (is_test) test_n else .Machine$integer.max
+rn_where <- if (is_test) glue("WHERE rn <= {test_n}") else ""
 run(glue("
   CREATE OR REPLACE TABLE eov_member AS
   SELECT eov, aphia_id FROM (
     SELECT eov, aphia_id, row_number() OVER (PARTITION BY eov ORDER BY aphia_id) AS rn
     FROM (SELECT DISTINCT t.eov, m.aphia_id
           FROM eov_tree t JOIN eov_am_map0 m ON m.aphia_id = t.taxonID))
-  WHERE rn <= {rn_max}"))
+  {rn_where}"))
 
 # models with a partition file on disk ----
 am_map <- dbGetQuery(con, "
