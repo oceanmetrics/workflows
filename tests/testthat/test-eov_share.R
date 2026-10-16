@@ -553,7 +553,7 @@ test_that("cell species: stage 1 + 2 on the fixture give sorted tiles, suit = ro
   # A (range c2-c4) has no row in the clipped-out cell 1; D has none at all
   expect_false(any(d$cell_id == 1L & d$aphia_id == 101L))
   expect_false(any(d$aphia_id == 104L))
-  types <- DBI::dbGetQuery(con, glue::glue("DESCRIBE SELECT * FROM read_parquet('{out}/tile=0/data_0.parquet')"))
+  types <- DBI::dbGetQuery(con, glue::glue("DESCRIBE SELECT * FROM read_parquet('{out}/tile=0/data_0.parquet', hive_partitioning = false)"))
   expect_equal(types$column_type, c("INTEGER", "INTEGER", "UTINYINT"))
   expect_silent(cell_species_check(cell_species_tile_path(out, 0L), con))
 })
