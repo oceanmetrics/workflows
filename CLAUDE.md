@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-Quarto notebooks (R) for OceanMetrics.io data processing. There is no R package, no test suite, and no build
-step beyond rendering notebooks. Sibling repos live in `../` (notably `../apps`, the Shiny apps that consume
+Quarto notebooks (R) for OceanMetrics.io data processing. There is no R package and no build step beyond rendering
+notebooks. R tests exist only for the `aquamaps_eov` rules (`tests/testthat/test-eov_share.R`); the `om:` block
+logic below is tested in `../extract` (pytest). Sibling repos live in `../` (notably `../apps`, the Shiny apps that consume
 the data produced here, e.g. `../apps/indicators/app.R`).
 
 ## Commands
@@ -18,6 +19,24 @@ the data produced here, e.g. `../apps/indicators/app.R`).
   push to `main`, so a notebook change is not published until its re-rendered HTML (and `*_files/` folder) is
   committed too. `_output/README.md` is a Jekyll index that lists the rendered pages.
 - `_environment` sets `home_directory='/tmp'` and is git-ignored.
+
+## The `om:` block, run order, DAG and index
+
+Every notebook carries an `om:` block in its YAML front matter (schema:
+`../platform/packages/catalog/schemas/om-notebook.schema.json`; example in `../extract/README.md`): `target_name`,
+`workflow_type` (ingest, extract, publish, release, reference, explore), `dependency` (target_names that run first),
+`output` (the manifest that marks the target done), `products`, `schedule`, `status` (active, archived, draft) and a
+one-sentence `description`. No `[auto]` dependencies. The run order, the DAG and the index page are generated from the
+blocks, never edited by hand. After adding or changing a block (not a render), from this directory:
+
+```sh
+uv run --project ../extract om-extract notebooks check .                                   # exit 1 on schema, duplicate, unknown-dependency or cycle errors
+uv run --project ../extract om-extract notebooks index . --title "Ocean Metrics workflows"  # writes index.qmd, _om/order.json, _om/dag.mmd
+```
+
+Commit `index.qmd` and `_om/` with the notebooks. `index.qmd` is rendered with the site (`quarto render`) into
+`_output/index.html`; `_om/order.json` is the run order (archived notebooks excluded). An active notebook may not depend
+on an archived one.
 
 ## Notebooks
 

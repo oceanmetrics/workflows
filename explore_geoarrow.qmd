@@ -1,5 +1,13 @@
 ---
 title: "Explore geoarrow"
+om:
+  target_name: explore_geoarrow
+  workflow_type: explore
+  dependency: []
+  output: _output/explore_geoarrow.html
+  schedule: manual
+  status: archived
+  description: Experiments writing and reading sf data as GeoParquet locally and on S3.
 ---
 
 ## Write parquet locally

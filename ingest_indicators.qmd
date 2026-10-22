@@ -6,6 +6,14 @@ format:
   html:
     toc-expand: 1    
     code-fold: true
+om:
+  target_name: ingest_indicators
+  workflow_type: ingest
+  dependency: []
+  output: _output/ingest_indicators.html
+  schedule: manual
+  status: archived
+  description: Ingested the indicator shapefiles into PostGIS and PMTiles; archived because the Shiny apps it fed are retired.
 ---
 
 ## Overview

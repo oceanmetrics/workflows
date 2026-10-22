@@ -15,6 +15,20 @@ execute:
 editor: source
 editor_options:
   chunk_output_type: console
+om:
+  target_name: aquamaps_eov
+  workflow_type: publish
+  dependency: []
+  output: https://storage.oceanmetrics.io/atlas/aquamaps_eov/provenance.json
+  products:
+    - {href: "https://storage.oceanmetrics.io/atlas/aquamaps_eov/collection.json", kind: stac-collection, title: STAC collection}
+    - {href: "https://storage.oceanmetrics.io/atlas/aquamaps_eov/score_risk.tif", kind: cog, title: "Risk-weighted share score (COG, 9 bands)"}
+    - {href: "https://storage.oceanmetrics.io/atlas/aquamaps_eov/score_share.tif", kind: cog, title: "Share score (COG, 9 bands)"}
+    - {href: "https://storage.oceanmetrics.io/atlas/aquamaps_eov/h3_r5.parquet", kind: parquet, title: "H3 resolution 5 scores and densities"}
+    - {href: "https://storage.oceanmetrics.io/atlas/aquamaps_eov/eov_taxa.parquet", kind: parquet, title: Taxon crosswalk by EOV}
+  schedule: manual
+  status: active
+  description: Extinction-risk weighted habitat share of AquaMaps species by Essential Ocean Variable on the 0.05 degree global grid, published as COGs, H3 Parquet and a STAC collection.
 ---
 
 ```{r}

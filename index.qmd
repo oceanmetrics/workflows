@@ -1,0 +1,73 @@
+---
+title: "Ocean Metrics workflows"
+format:
+  html:
+    toc: true
+    code-tools: false
+---
+
+```{=html}
+<style>
+.om-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(22rem, 1fr)); gap: 1rem; }
+.om-card { border: 1px solid #8884; border-radius: 6px; padding: 0 1rem 0.5rem; }
+.om-card h3 { font-size: 1.1rem; margin-top: 1rem; }
+</style>
+```
+
+## Pipeline
+
+```{mermaid}
+graph LR
+  t_aquamaps_eov(["aquamaps_eov"]):::publish
+  t_explore_geoarrow(["explore_geoarrow"]):::archived
+  t_ingest_indicators(["ingest_indicators"]):::archived
+  classDef publish fill:#20c997,stroke:#00000033,color:#10161c;
+  classDef archived fill:#eeeeee,stroke:#999999,stroke-dasharray:4 3,color:#777777;
+```
+
+## Publish
+
+::: {.om-cards}
+
+::: {.om-card}
+### AquaMaps EOV share: extinction-risk weighted habitat share by Essential Ocean Variable
+
+Extinction-risk weighted habitat share of AquaMaps species by Essential Ocean Variable on the 0.05 degree global grid, published as COGs, H3 Parquet and a STAC collection.
+
+- Notebook: [aquamaps_eov.html](aquamaps_eov.html)
+- Target: `aquamaps_eov`, schedule `manual`
+- Output: [https://storage.oceanmetrics.io/atlas/aquamaps_eov/provenance.json](https://storage.oceanmetrics.io/atlas/aquamaps_eov/provenance.json)
+- Product (stac-collection): [STAC collection](https://storage.oceanmetrics.io/atlas/aquamaps_eov/collection.json)
+- Product (cog): [Risk-weighted share score (COG, 9 bands)](https://storage.oceanmetrics.io/atlas/aquamaps_eov/score_risk.tif)
+- Product (cog): [Share score (COG, 9 bands)](https://storage.oceanmetrics.io/atlas/aquamaps_eov/score_share.tif)
+- Product (parquet): [H3 resolution 5 scores and densities](https://storage.oceanmetrics.io/atlas/aquamaps_eov/h3_r5.parquet)
+- Product (parquet): [Taxon crosswalk by EOV](https://storage.oceanmetrics.io/atlas/aquamaps_eov/eov_taxa.parquet)
+:::
+
+:::
+
+## Archived
+
+::: {.om-cards}
+
+::: {.om-card}
+### Ocean Metrics Indicators Data Ingestion Workflow
+
+Ingested the indicator shapefiles into PostGIS and PMTiles; archived because the Shiny apps it fed are retired.
+
+- Notebook: [ingest_indicators.html](ingest_indicators.html)
+- Target: `ingest_indicators`, schedule `manual`
+- Output: `_output/ingest_indicators.html`
+:::
+
+::: {.om-card}
+### Explore geoarrow
+
+Experiments writing and reading sf data as GeoParquet locally and on S3.
+
+- Notebook: [explore_geoarrow.html](explore_geoarrow.html)
+- Target: `explore_geoarrow`, schedule `manual`
+- Output: `_output/explore_geoarrow.html`
+:::
+
+:::

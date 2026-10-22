@@ -1,0 +1,32 @@
+{
+  "generated": "2026-10-22T17:49:22+00:00",
+  "order": [
+    "aquamaps_eov"
+  ],
+  "notebooks": [
+    {
+      "target_name": "aquamaps_eov",
+      "path": "aquamaps_eov.qmd",
+      "workflow_type": "publish",
+      "status": "active",
+      "dependency": [],
+      "output": "https://storage.oceanmetrics.io/atlas/aquamaps_eov/provenance.json"
+    },
+    {
+      "target_name": "explore_geoarrow",
+      "path": "explore_geoarrow.qmd",
+      "workflow_type": "explore",
+      "status": "archived",
+      "dependency": [],
+      "output": "_output/explore_geoarrow.html"
+    },
+    {
+      "target_name": "ingest_indicators",
+      "path": "ingest_indicators.qmd",
+      "workflow_type": "ingest",
+      "status": "archived",
+      "dependency": [],
+      "output": "_output/ingest_indicators.html"
+    }
+  ]
+}
