@@ -620,14 +620,12 @@ n_report <- tibble(eov = populated,
 #| label: outputs
 
 # COGs ----
-cog_opts <- c("COMPRESS=DEFLATE", "BLOCKSIZE=512", "OVERVIEWS=AUTO", "RESAMPLING=AVERAGE")
+# every GeoTIFF goes through eov_cog_write(): DEFLATE, 512 tiles, NEAREST overviews (never averaged)
 for (m in c("risk", "share")) {
   r_s <- cells_to_raster(cells$cell_id, score_bands(m), p$cell_tif, nodata = 255)
-  writeRaster(r_s, file.path(dir_out, glue("score_{m}.tif")), filetype = "COG",
-              datatype = "INT1U", NAflag = 255, gdal = cog_opts, overwrite = T)
+  eov_cog_write(r_s, file.path(dir_out, glue("score_{m}.tif")), datatype = "INT1U", NAflag = 255)
   r_d <- cells_to_raster(cells$cell_id, dens_bands(m), p$cell_tif, nodata = NaN)
-  writeRaster(r_d, file.path(dir_out, glue("density_{m}.tif")), filetype = "COG",
-              datatype = "FLT4S", NAflag = NaN, gdal = cog_opts, overwrite = T)
+  eov_cog_write(r_d, file.path(dir_out, glue("density_{m}.tif")), datatype = "FLT4S", NAflag = NaN)
   rm(r_s, r_d); invisible(gc())
 }
 

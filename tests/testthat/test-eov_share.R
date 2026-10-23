@@ -651,3 +651,57 @@ test_that("eov_cog_assets: a missing atlas checkout stops before running anythin
   file.create(tif, it)
   expect_error(eov_cog_assets(it, tif, atlas = tempfile()), "atlas checkout not found")
 })
+
+# COG writer: nearest overviews, never averaged ----
+test_that("eov_cog_options: nearest by default, DEFLATE, 512 tiles; averaging is refused", {
+  o <- eov_cog_options()
+  expect_true(all(c("COMPRESS=DEFLATE", "BLOCKSIZE=512", "OVERVIEWS=AUTO",
+                    "RESAMPLING=NEAREST", "OVERVIEW_RESAMPLING=NEAREST") %in% o))
+  expect_false(any(grepl("AVERAGE", o)))
+  expect_false(any(grepl("OVERVIEW_COUNT", o)))
+  expect_true("OVERVIEW_COUNT=1" %in% eov_cog_options(overview_count = 1))
+  expect_true("RESAMPLING=MODE" %in% eov_cog_options("mode"))
+  expect_error(eov_cog_options("AVERAGE"), "never averaged")
+  expect_error(eov_cog_options("bilinear"), "never averaged")
+})
+
+# values of the first overview of a COG (gdal_translate reads it when asked for the overview's size)
+.cog_overview_values <- function(path, n) {
+  f <- tempfile(fileext = ".tif")
+  sf::gdal_utils("translate", path, f, options = c("-outsize", n, n, "-r", "nearest", "-of", "GTiff"))
+  as.numeric(terra::values(terra::rast(f)))
+}
+
+test_that("eov_cog_write: the 2x2 overview of a 4x4 raster keeps input values (averaging would not)", {
+  skip_if_not_installed("sf")
+  # one odd cell (1) in a block of 10s: the mean of that block is 7.75, which is not a value of the input
+  r <- terra::rast(nrows = 4, ncols = 4, xmin = 0, xmax = 4, ymin = 0, ymax = 4, crs = "EPSG:4326")
+  terra::values(r) <- c(1, rep(10, 15))
+  p <- tempfile(fileext = ".tif")
+  expect_identical(eov_cog_write(r, p, datatype = "FLT4S", NAflag = NaN, overview_count = 1), p)
+  expect_true(file.exists(p))
+  ov <- .cog_overview_values(p, 2)
+  expect_length(ov, 4)
+  expect_true(all(ov %in% c(1, 10)))
+  expect_false(7.75 %in% ov)
+  # full resolution is untouched
+  expect_equal(as.numeric(terra::values(terra::rast(p))), c(1, rep(10, 15)))
+
+  # control: the writer's old averaged overviews do produce a value outside the input set
+  pa <- tempfile(fileext = ".tif")
+  terra::writeRaster(r, pa, filetype = "COG", datatype = "FLT4S",
+                     gdal = c("BLOCKSIZE=128", "OVERVIEWS=AUTO", "OVERVIEW_COUNT=1", "RESAMPLING=AVERAGE"),
+                     overwrite = T)
+  expect_true(7.75 %in% .cog_overview_values(pa, 2))
+})
+
+test_that("eov_cog_write: Byte scores with nodata 255 round-trip and stay in the input set", {
+  skip_if_not_installed("sf")
+  r <- terra::rast(nrows = 4, ncols = 4, xmin = 0, xmax = 4, ymin = 0, ymax = 4, crs = "EPSG:4326")
+  terra::values(r) <- c(0, 100, 100, 100,  100, 100, 100, 100,  50, 50, 50, 50,  50, 50, 50, NA)
+  p <- tempfile(fileext = ".tif")
+  eov_cog_write(r, p, datatype = "INT1U", NAflag = 255, overview_count = 1)
+  expect_equal(as.numeric(terra::values(terra::rast(p))), as.numeric(terra::values(r)))
+  ov <- .cog_overview_values(p, 2)
+  expect_true(all(ov[!is.na(ov)] %in% c(0, 50, 100)))
+})

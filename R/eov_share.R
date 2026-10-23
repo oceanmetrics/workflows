@@ -5,6 +5,8 @@
 # needs: glue, jsonlite, terra, digest (loaded by the callers, not here).
 # COG step: eov_cog_assets() calls the atlas pipeline (uv run <atlas>/pipeline/build.py cog-assets) after the score
 # COGs and their Items are written; the notebook writes the COGs (terra COG driver), this file holds the rule.
+# COG writer: eov_cog_write() writes EVERY GeoTIFF of the product (score_* and density_*) with NEAREST (or MODE)
+# overviews, never averaged (the atlas pipeline rule); eov_cog_options() holds the GDAL creation options.
 
 # seeds ----
 
@@ -922,6 +924,53 @@ stac_item_eov <- function(
 }
 
 # browser COG assets (atlas pipeline) ----
+
+#' GDAL creation options of the product's COGs
+#'
+#' Pure, so a test can assert them. The overviews are resampled `NEAREST` (or `MODE`) and never averaged, the
+#' atlas pipeline rule for every file it serves (a mean of scores or densities is not a value of the product,
+#' and `density_*` are reference-only but the rule holds for every file). `RESAMPLING` and `OVERVIEW_RESAMPLING`
+#' are both set so the choice holds whichever the GDAL COG driver reads first.
+#'
+#' @param resampling overview resampling: "NEAREST" (default) or "MODE"; anything else (average, bilinear, ...)
+#'   stops
+#' @param compress compression codec (default "DEFLATE")
+#' @param blocksize COG tile size in pixels (default 512, the COG driver minimum is 128)
+#' @param overview_count number of overviews, NULL (default) lets `OVERVIEWS=AUTO` choose; set it to force
+#'   overviews on a raster smaller than `blocksize`
+#' @return character vector of `KEY=VALUE` options for `terra::writeRaster(gdal = )`
+eov_cog_options <- function(resampling = c("NEAREST", "MODE"), compress = "DEFLATE", blocksize = 512L,
+                            overview_count = NULL) {
+  resampling <- toupper(resampling)
+  stopifnot(length(resampling) >= 1)
+  stopifnot("overviews must be NEAREST or MODE, never averaged" = resampling[1] %in% c("NEAREST", "MODE"))
+  c(paste0("COMPRESS=", compress),
+    paste0("BLOCKSIZE=", as.integer(blocksize)),
+    "OVERVIEWS=AUTO",
+    if (!is.null(overview_count)) paste0("OVERVIEW_COUNT=", as.integer(overview_count)),
+    paste0("RESAMPLING=", resampling[1]),
+    paste0("OVERVIEW_RESAMPLING=", resampling[1]))
+}
+
+#' Write a raster as a COG with nearest overviews
+#'
+#' The one writer for every GeoTIFF of the product (`score_<metric>.tif` and `density_<metric>.tif`): a thin
+#' `terra::writeRaster(filetype = "COG")` call with [eov_cog_options()], so no file is written with averaged
+#' overviews. Compression and tile size are those the notebook always used (DEFLATE, 512).
+#'
+#' @param r SpatRaster
+#' @param path output .tif path
+#' @param datatype terra datatype, e.g. "INT1U" (scores) or "FLT4S" (densities)
+#' @param NAflag nodata value (255 for scores, NaN for densities)
+#' @param overwrite replace an existing file
+#' @param ... passed to [eov_cog_options()] (resampling, compress, blocksize, overview_count)
+#' @return `path`, invisibly
+eov_cog_write <- function(r, path, datatype = "FLT4S", NAflag = NA, overwrite = T, ...) {
+  stopifnot(inherits(r, "SpatRaster"), length(path) == 1)
+  terra::writeRaster(r, path, filetype = "COG", datatype = datatype, NAflag = NAflag,
+                     gdal = eov_cog_options(...), overwrite = overwrite)
+  invisible(path)
+}
 
 #' Arguments of the atlas pipeline's `cog-assets` command
 #'
