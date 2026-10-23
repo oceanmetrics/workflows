@@ -94,8 +94,10 @@ earlier prompts and outcomes for this repo.
   batch loop, stage 2 per band in the `cell_species` chunk, markers/partials in `work_<ver>/cs_partials_*`);
   `EOV_WEIGHTS=ohi|mst_v1`; `EOV_Q=0.99`; `EOV_VERIFY_N=20` COG spot-check against the published
   `aquamaps_native` COGs (0 skips); `BUILD_MEMORY_GB`, `BUILD_THREADS`, `BUILD_TMP_GB` (spill cap, default 100).
+- The `stac` chunk writes the Items, then runs `eov_cog_assets()` per score COG (needs `uv` and `../atlas`, or `ATLAS_DIR`)
+  BEFORE the collection reads the COGs' `file:size`/`file:checksum`: the command rewrites `score_<metric>.tif` in place.
 - Every scientific rule is a function in `R/eov_share.R` (seeds, WoRMS subtree CTE, Red List weights, share SQL,
-  score, composite, `cells_to_raster`, STAC builders); `tests/testthat/test-eov_share.R` asserts them on synthetic
+  score, composite, `cells_to_raster`, STAC builders, `eov_cog_assets` = the atlas pipeline's `cog-assets` step); `tests/testthat/test-eov_share.R` asserts them on synthetic
   fixtures. Change a rule there and in its test in the same commit; run
   `Rscript -e 'testthat::test_dir("tests/testthat")'` before rendering.
 - Diagrams: edit `diagrams/*.mmd`, run `libs/render_diagrams.sh` (uses `node_modules/.bin/mmdc` or `mmdc` on the

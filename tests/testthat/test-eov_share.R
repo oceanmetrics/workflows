@@ -637,3 +637,17 @@ test_that("stac: atlas:cell_species field only when asked, verbatim contract", {
   expect_equal(js[["atlas:cell_species"]]$value_range, list(1, 100))
   expect_equal(js[["atlas:flower"]]$composite, "all")      # the other fields survive
 })
+
+# browser COG assets ----
+test_that("eov_cog_assets_args: the atlas pipeline's cog-assets command, items before the tif", {
+  a <- eov_cog_assets_args(c("a.json", "b.json"), "score_risk.tif", atlas = "/x/atlas")
+  expect_equal(a[1:5], c("run", "--project", "/x/atlas/pipeline", "/x/atlas/pipeline/build.py", "cog-assets"))
+  expect_equal(a[6:8], shQuote(c("a.json", "b.json", "score_risk.tif")))
+  expect_error(eov_cog_assets_args(character(), "t.tif"))
+})
+
+test_that("eov_cog_assets: a missing atlas checkout stops before running anything", {
+  tif <- tempfile(fileext = ".tif"); it <- tempfile(fileext = ".json")
+  file.create(tif, it)
+  expect_error(eov_cog_assets(it, tif, atlas = tempfile()), "atlas checkout not found")
+})

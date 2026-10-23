@@ -963,8 +963,34 @@ if (do_cs) {
 ```{r}
 #| label: stac
 
-# assets with size and multihash checksum ----
 f <- \(x) file.path(dir_out, x)
+
+# items: 8 EOV values x 2 metrics ----
+grid <- expand.grid(eov = eov_levels(), metric = c("risk", "share"), stringsAsFactors = F) |> as_tibble()
+n_by <- setNames(eov_summary$n_taxa[eov_summary$metric == "risk"], eov_summary$eov[eov_summary$metric == "risk"])
+item_ids <- paste0(grid$eov, "_", grid$metric)
+unlink(f("items"), recursive = T)
+for (i in seq_len(nrow(grid))) {
+  g <- grid$eov[i]; m <- grid$metric[i]
+  q <- q_tab$q99[q_tab$eov == g & q_tab$metric == m]
+  it <- stac_item_eov(
+    g, m, version = ver,
+    n_taxa = if (g %in% names(n_by)) as.integer(n_by[[g]]) else 0L,
+    q99    = if (length(q) == 1) q else NA_real_)
+  write_stac_json(it, f(file.path("items", paste0(item_ids[i], ".json"))))
+}
+
+# the browser COG assets: nearest overviews, the EPSG:3857 copy, statistics and histograms ----
+# the atlas pipeline (oceanmetrics/atlas) rewrites score_<metric>.tif in place (nearest overviews, so its size and
+# checksum change) and the Items over it, so this runs BEFORE the collection's score_* assets read file:size and
+# file:checksum, and before the upload chunk (aws s3 sync carries the score_<metric>_3857.tif copies)
+for (m in c("risk", "share")) {
+  eov_cog_assets(
+    items = f(file.path("items", paste0(eov_levels(), "_", m, ".json"))),
+    tif   = f(glue("score_{m}.tif")))
+}
+
+# assets with size and multihash checksum ----
 pq_type <- "application/vnd.apache.parquet"
 cells_parts <- lapply(c("all", populated), \(g) {
   rel <- as.character(glue("cells/eov={g}/data.parquet"))
@@ -1015,21 +1041,6 @@ if (do_cs) {
     `table:columns` = list(
       list(name = "cell_id", type = "int32"), list(name = "aphia_id", type = "int32"),
       list(name = "suit", type = "uint8", description = "suitability 1-100 = round(max v)")))
-}
-
-# items: 8 EOV values x 2 metrics ----
-grid <- expand.grid(eov = eov_levels(), metric = c("risk", "share"), stringsAsFactors = F) |> as_tibble()
-n_by <- setNames(eov_summary$n_taxa[eov_summary$metric == "risk"], eov_summary$eov[eov_summary$metric == "risk"])
-item_ids <- paste0(grid$eov, "_", grid$metric)
-unlink(f("items"), recursive = T)
-for (i in seq_len(nrow(grid))) {
-  g <- grid$eov[i]; m <- grid$metric[i]
-  q <- q_tab$q99[q_tab$eov == g & q_tab$metric == m]
-  it <- stac_item_eov(
-    g, m, version = ver,
-    n_taxa = if (g %in% names(n_by)) as.integer(n_by[[g]]) else 0L,
-    q99    = if (length(q) == 1) q else NA_real_)
-  write_stac_json(it, f(file.path("items", paste0(item_ids[i], ".json"))))
 }
 
 # collection ----

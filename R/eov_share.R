@@ -3,6 +3,8 @@
 # sourced by aquamaps_eov.qmd and tested by tests/testthat/test-eov_share.R, so the
 # notebook calls the rules and the tests assert them (they cannot drift).
 # needs: glue, jsonlite, terra, digest (loaded by the callers, not here).
+# COG step: eov_cog_assets() calls the atlas pipeline (uv run <atlas>/pipeline/build.py cog-assets) after the score
+# COGs and their Items are written; the notebook writes the COGs (terra COG driver), this file holds the rule.
 
 # seeds ----
 
@@ -917,6 +919,44 @@ stac_item_eov <- function(
       list(rel = "parent",     href = "../collection.json",    type = "application/json"),
       list(rel = "collection", href = "../collection.json",    type = "application/json"),
       list(rel = "self",       href = paste0("./", id, ".json"), type = "application/json")))
+}
+
+# browser COG assets (atlas pipeline) ----
+
+#' Arguments of the atlas pipeline's `cog-assets` command
+#'
+#' Pure, so a test can assert the command line. `uv run --project <atlas>/pipeline <atlas>/pipeline/build.py
+#' cog-assets <item.json>... <tif>` rebuilds the overviews of `tif` in place with nearest resampling (the
+#' writer's averaged overviews are replaced), writes `<stem>_3857.tif` beside it, reads the band statistics
+#' and histograms from the full-resolution original, and rewrites each Item with the `cog` (EPSG:4326) and
+#' `cog_3857` assets; it exits non-zero when an Item then fails the platform `cog` profile.
+#'
+#' @param items Item JSON files over `tif`, rewritten in place
+#' @param tif the 4326 score COG (`score_<metric>.tif`)
+#' @param atlas path of the oceanmetrics/atlas checkout (default: the sibling `../atlas`, or `$ATLAS_DIR`)
+#' @return character vector of arguments for `uv`
+eov_cog_assets_args <- function(items, tif, atlas = Sys.getenv("ATLAS_DIR", "../atlas")) {
+  stopifnot(length(items) >= 1, length(tif) == 1)
+  atlas <- normalizePath(atlas, mustWork = F)
+  c("run", "--project", file.path(atlas, "pipeline"), file.path(atlas, "pipeline", "build.py"),
+    "cog-assets", shQuote(items), shQuote(tif))
+}
+
+#' Add the browser COG assets to the Items over a score COG
+#'
+#' Run after the COG and its Items are written, and BEFORE anything reads the COG's `file:size` or
+#' `file:checksum` (the pipeline rewrites the COG in place) and before the upload (`aws s3 sync` carries
+#' the `_3857.tif` copy). Needs `uv`, GDAL and the atlas checkout; see [eov_cog_assets_args()].
+#'
+#' @inheritParams eov_cog_assets_args
+#' @return the `tif` path, invisibly; stops when the command fails
+eov_cog_assets <- function(items, tif, atlas = Sys.getenv("ATLAS_DIR", "../atlas")) {
+  stopifnot(file.exists(tif), all(file.exists(items)),
+            "atlas checkout not found (set ATLAS_DIR)" =
+              file.exists(file.path(atlas, "pipeline", "build.py")))
+  rc <- system2("uv", eov_cog_assets_args(items, tif, atlas))
+  stopifnot("atlas cog-assets failed" = rc == 0)
+  invisible(tif)
 }
 
 #' Write a STAC list to JSON
