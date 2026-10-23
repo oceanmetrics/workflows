@@ -86,7 +86,7 @@ earlier prompts and outcomes for this repo.
   `eov_summary.csv`, `method.json`, `provenance.json`, README/AGENTS, STAC `collection.json` + 16 `items/`.
   The DuckDB work file and checkpoints are in `~/_big/oceanmetrics/aquamaps_eov/work_<ver>/`.
 - Flags (environment): `EOV_TEST_N=<n>` first n species per EOV, writes to `.../test`, never uploads;
-  `EOV_REDO=1` recompute checkpoints; `EOV_S3=1` upload with `aws s3 sync --delete` (the only side effect);
+  `EOV_REDO=1` recompute checkpoints; `EOV_S3=1` upload through `../platform/scripts/om-publish.sh` (both stores, an explicit file list, never a delete; `EOV_S3=dry` lists only; the only side effect);
   `EOV_BATCH_ROWS=80e6` rows per batch of species (the pass over the AquaMaps rows is batched; each batch writes
   `work_<ver>/partials_*/totals|cell_eov/batch_<id>.parquet`, finished batches are skipped on a re-render, `EOV_REDO=1` deletes them);
   `EOV_CELL_SPECIES=1|0` the cell -> species table (5 degree Parquet tiles `cell_species/tile=<t>/data_0.parquet` of

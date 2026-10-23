@@ -46,7 +46,8 @@ ver       <- "1.0.0"
 test_n    <- as.integer(Sys.getenv("EOV_TEST_N", "0"))
 is_test   <- !is.na(test_n) && test_n > 0
 redo      <- Sys.getenv("EOV_REDO") == "1"
-do_s3     <- Sys.getenv("EOV_S3") == "1" && !is_test   # a test run never uploads
+s3_mode   <- Sys.getenv("EOV_S3")                          # "1" uploads, "dry" lists what would go (om-publish --dry-run)
+do_s3     <- s3_mode %in% c("1", "dry") && !is_test        # a test run never uploads
 scheme    <- Sys.getenv("EOV_WEIGHTS", "ohi")
 q_score   <- as.numeric(Sys.getenv("EOV_Q", "0.99"))
 verify_n  <- as.integer(Sys.getenv("EOV_VERIFY_N", "20"))
@@ -327,7 +328,7 @@ tibble(
   setting = c("version", "mode", "weights", "score quantile", "verify species", "upload",
               "memory", "threads", "rows per batch", "cell to species", "staging dir", "inputs"),
   value   = c(ver, if (is_test) glue("test: first {test_n} species per EOV") else "full run",
-              scheme, q_score, verify_n, if (do_s3) "EOV_S3=1" else "off",
+              scheme, q_score, verify_n, if (do_s3) paste0("EOV_S3=", s3_mode) else "off",
               glue("{mem_gb} GB"), n_threads, format(batch_rows, big.mark = ",", scientific = F),
               if (do_cs) "on (EOV_CELL_SPECIES)" else "off", dir_out, dir_derived)) |>
   kable()
@@ -981,7 +982,7 @@ for (i in seq_len(nrow(grid))) {
 # the browser COG assets: nearest overviews, the EPSG:3857 copy, statistics and histograms ----
 # the atlas pipeline (oceanmetrics/atlas) rewrites score_<metric>.tif in place (nearest overviews, so its size and
 # checksum change) and the Items over it, so this runs BEFORE the collection's score_* assets read file:size and
-# file:checksum, and before the upload chunk (aws s3 sync carries the score_<metric>_3857.tif copies)
+# file:checksum, and before the upload chunk (om-publish carries the score_<metric>_3857.tif copies)
 for (m in c("risk", "share")) {
   eov_cog_assets(
     items = f(file.path("items", paste0(eov_levels(), "_", m, ".json"))),
@@ -1122,20 +1123,33 @@ equality is tested against the floor of the partition value.
 ## Upload {#sec-upload}
 
 Uploading is the only side effect of the notebook. It runs only with `EOV_S3=1` (and never in a
-test run), mirrors the staging directory to the public prefix with `--delete`, then reads
-`collection.json` back through the public URL and compares it with the local file.
+test run; `EOV_S3=dry` lists what would be sent and writes nothing) and goes through
+`oceanmetrics/platform` `scripts/om-publish.sh` (`OM_PUBLISH`, else a platform checkout beside this repo): both
+stores, R2 then S3, **never a delete**. Until 2026-10-23 this chunk mirrored the staging directory with
+`aws s3 sync --delete`, which would remove from the bucket whatever the run no longer wrote; it now sends an explicit
+list of files, the regular files of the staging directory (`eov_publish_files()`: no hidden file, partial or backup),
+as a folder of symlinks, and deletes nothing. A file that an earlier version published and this one no longer writes
+stays in the bucket (no reader links to it from the new `collection.json`) until a reviewed prune, which is a
+separate `rclone delete --dry-run` and never part of this notebook. An object that is overwritten is first copied on R2
+to `atlas/_history/<date>/aquamaps_eov/`. The Items go up before `collection.json`, which goes last. The chunk then
+reads `collection.json` back through the public URL and compares it with the local file.
 
 ```{r}
 #| label: upload
 
 if (do_s3) {
-  dest <- "s3://oceanmetrics.io-public/atlas/aquamaps_eov/"
-  rc <- system2("aws", c("s3", "sync", shQuote(dir_out), dest, "--delete"))
+  files_pub <- eov_publish_files(dir_out)
+  stage_pub <- eov_publish_stage(dir_out, files_pub)
+  cat(length(files_pub), "files from", dir_out, "-> atlas/aquamaps_eov (om-publish.sh,", if (s3_mode == "1") "really" else "dry run", ")\n")
+  rc <- system2(eov_publish_path(), eov_publish_args(stage_pub, really = s3_mode == "1"))
+  unlink(stage_pub, recursive = T)                       # symlinks only; the product stays
   stopifnot(rc == 0)
-  remote <- read_json(glue("{url_prod}/collection.json"))
-  local  <- read_json(file.path(dir_out, "collection.json"))
-  cat("read back collection.json identical to staged:", identical(remote, local), "\n")
-  stopifnot(identical(remote, local))
+  if (s3_mode == "1") {
+    remote <- read_json(glue("{url_prod}/collection.json"))
+    local  <- read_json(file.path(dir_out, "collection.json"))
+    cat("read back collection.json identical to staged:", identical(remote, local), "\n")
+    stopifnot(identical(remote, local))
+  }
 } else {
   cat("skipped (EOV_S3 unset)\n")
 }
@@ -1316,7 +1330,7 @@ run are
 EOV_TEST_N=50 quarto render aquamaps_eov.qmd          # test subset
 quarto render aquamaps_eov.qmd                        # full run (about 12 GB of memory)
 EOV_REDO=1 quarto render aquamaps_eov.qmd             # recompute the checkpoints
-EOV_S3=1 quarto render aquamaps_eov.qmd               # also upload (the only side effect)
+EOV_S3=1 quarto render aquamaps_eov.qmd               # also upload (the only side effect; EOV_S3=dry lists only)
 ```
 
 Flags: `EOV_REDO`, `EOV_S3`, `EOV_TEST_N`, `EOV_WEIGHTS` (`ohi` or `mst_v1`), `EOV_Q` (score

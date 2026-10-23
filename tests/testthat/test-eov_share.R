@@ -705,3 +705,52 @@ test_that("eov_cog_write: Byte scores with nodata 255 round-trip and stay in the
   ov <- .cog_overview_values(p, 2)
   expect_true(all(ov[!is.na(ov)] %in% c(0, 50, 100)))
 })
+
+# publish ----
+test_that("publish: the file list is every product file, without partials, hidden files and backups; collection.json is required", {
+  d <- tempfile("out-"); dir.create(file.path(d, "items"), recursive = T); dir.create(file.path(d, "cell_species/tile=954"), recursive = T)
+  for (f in c("collection.json", "score_risk.tif", "score_risk_3857.tif", "items/fish_risk.json", "cell_species/tile=954/data_0.parquet",
+              ".DS_Store", "items/.DS_Store", "x.part", "y.tmp", "z.json~"))
+    writeLines(f, file.path(d, f))
+  expect_equal(eov_publish_files(d), c("cell_species/tile=954/data_0.parquet", "collection.json", "items/fish_risk.json",
+                                       "score_risk.tif", "score_risk_3857.tif"))
+  unlink(file.path(d, "collection.json"))
+  expect_error(eov_publish_files(d), "collection.json is not staged")
+})
+
+test_that("publish: the stage holds symlinks to exactly the listed files, so a stray file cannot go out", {
+  d <- tempfile("out-"); dir.create(file.path(d, "items"), recursive = T)
+  for (f in c("collection.json", "items/a.json", "stray.bin")) writeLines(f, file.path(d, f))
+  st <- eov_publish_stage(d, c("collection.json", "items/a.json"))
+  expect_equal(sort(list.files(st, recursive = T)), c("collection.json", "items/a.json"))
+  expect_equal(readLines(file.path(st, "items/a.json")), "items/a.json")
+  expect_true(nzchar(Sys.readlink(file.path(st, "collection.json"))))
+  expect_error(eov_publish_stage(d, c("collection.json", "missing.json")))
+})
+
+test_that("publish: om-publish arguments: both stores through the one script, history kept, items then collection.json last, never a delete", {
+  a <- eov_publish_args("/tmp/st", really = TRUE)
+  expect_equal(a, c("--really", "--keep-history", "--last", "items/*", "--last", "collection.json", "'/tmp/st'", "atlas/aquamaps_eov"))
+  expect_false(any(grepl("delete", a)))
+  expect_equal(eov_publish_args("/tmp/st", really = FALSE)[1], "--dry-run")
+  # regression: the upload used to be `aws s3 sync --delete`; no argument may ask for a delete
+  expect_false(any(grepl("--delete", eov_publish_args("/tmp/st"), fixed = T)))
+})
+
+test_that("publish: the script runs against the fake aws and rclone of platform, in the order of the arguments", {
+  plat <- c("../platform", file.path("../../../platform"), file.path(Sys.getenv("HOME"), "Github/oceanmetrics/platform"))
+  plat <- plat[file.exists(file.path(plat, "scripts/om-publish.sh"))][1]
+  skip_if(is.na(plat), "no platform checkout beside this repo")
+  d <- tempfile("out-"); dir.create(file.path(d, "items"), recursive = T)
+  for (f in c("collection.json", "items/a.json", "score_risk.tif")) writeLines(f, file.path(d, f))
+  st <- eov_publish_stage(d, eov_publish_files(d))
+  fake <- normalizePath(file.path(plat, "scripts/om-publish/fake"))
+  log <- tempfile("calls-"); file.create(log)
+  out <- system2(file.path(plat, "scripts/om-publish.sh"), eov_publish_args(st, really = FALSE), stdout = T, stderr = T,
+                 env = c(paste0("PATH=", fake, ":", Sys.getenv("PATH")), paste0("OM_RCLONE=", fake, "/rclone-r2.sh"),
+                         paste0("OM_FAKE_LOG=", log), "OM_STORE=r2", "OM_HISTORY_DATE=2026-10-23"))
+  calls <- lapply(readLines(log), jsonlite::fromJSON)
+  up <- Filter(function(c) !is.null(c$files), calls)
+  expect_equal(lapply(up, \(c) sort(c$files)), list("score_risk.tif", "items/a.json", "collection.json"))
+  expect_true(any(grepl("dry run", out)))
+})

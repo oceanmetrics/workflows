@@ -1037,3 +1037,63 @@ eov_h3_sql <- function(cell_tbl, cols, res = 5L) {
     FROM {cell_tbl}
     GROUP BY 1")
 }
+
+# publish ----
+
+#' The files of the product to publish (the explicit list)
+#'
+#' Every regular file under the staging directory, as paths relative to it, sorted; hidden files (`.DS_Store`),
+#' `*.part`, `*.tmp` and editor backups (`*~`) are left out. The upload sends exactly these files and deletes nothing,
+#' so a file the product no longer writes stays where it is until a reviewed prune.
+#'
+#' @param dir_out the staging directory
+#' @return character vector of relative paths; stops when `collection.json` is not among them
+eov_publish_files <- function(dir_out) {
+  f <- sort(list.files(dir_out, recursive = T, all.files = F, include.dirs = F), method = "radix")
+  f <- f[!grepl("(\\.part|\\.tmp|~)$", f) & !grepl("(^|/)\\.", f)]
+  stopifnot("collection.json is not staged" = "collection.json" %in% f)
+  f
+}
+
+#' A folder of symlinks to exactly the listed files
+#'
+#' om-publish.sh uploads a folder; the explicit list becomes a folder of symlinks (it follows them), so a stray file in
+#' the staging directory cannot go out and no glob list has to be matched against thousands of tiles.
+#'
+#' @param dir_out the staging directory
+#' @param files relative paths, from [eov_publish_files()]
+#' @param stage the folder to make (default: a new temporary one)
+#' @return the stage folder
+eov_publish_stage <- function(dir_out, files, stage = tempfile("eov-publish-")) {
+  stopifnot(length(files) > 0, all(file.exists(file.path(dir_out, files))))
+  dir.create(stage, recursive = T)
+  for (f in files) {
+    dir.create(file.path(stage, dirname(f)), showWarnings = F, recursive = T)
+    stopifnot(file.symlink(normalizePath(file.path(dir_out, f)), file.path(stage, f)))
+  }
+  stage
+}
+
+#' The arguments of om-publish.sh for the product
+#'
+#' Both stores (R2, then S3), never a delete; an overwritten object is copied to `atlas/_history/<date>/aquamaps_eov/`
+#' on R2 first; the Items and then `collection.json` go last, so a reader never follows a link to a file that is not
+#' there yet.
+#'
+#' @param stage the folder from [eov_publish_stage()]
+#' @param really `FALSE`: a dry run (listings only)
+#' @param prefix the bucket prefix
+eov_publish_args <- function(stage, really = TRUE, prefix = "atlas/aquamaps_eov") {
+  c(if (really) "--really" else "--dry-run", "--keep-history",
+    "--last", "items/*", "--last", "collection.json", shQuote(stage), prefix)
+}
+
+#' om-publish.sh: OM_PUBLISH, else a platform checkout beside this repo, else ~/Github/oceanmetrics/platform
+eov_publish_path <- function() {
+  env <- Sys.getenv("OM_PUBLISH")
+  cand <- c(if (nzchar(env)) env, "../platform/scripts/om-publish.sh",
+            file.path(Sys.getenv("HOME"), "Github/oceanmetrics/platform/scripts/om-publish.sh"))
+  cand <- cand[file.exists(cand)]
+  if (!length(cand)) stop("om-publish.sh not found (set OM_PUBLISH to oceanmetrics/platform scripts/om-publish.sh)")
+  normalizePath(cand[1])
+}
