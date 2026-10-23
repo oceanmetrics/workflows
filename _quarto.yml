@@ -1,5 +1,7 @@
 project:
   output-dir: _output
+  # writes libs/ga-head.html: Google Analytics only when GA_ID is set in the render shell (README "Analytics")
+  pre-render: libs/ga-head.ts
   resources:
     - libs/diagram.js
     - libs/diagram.css
@@ -15,7 +17,9 @@ format:
     code-fold: show
     code-tools: true
     lightbox: true         # zoom figures; diagrams use the .cc-diagram viewer instead (.nolightbox)
-    include-in-header: libs/diagram-head.html
+    include-in-header:
+      - libs/diagram-head.html
+      - libs/ga-head.html  # written by the pre-render from GA_ID; no script when unset
 date: now
 date-format: "YYYY-MM-DD HH:mm:ss"
 editor: source

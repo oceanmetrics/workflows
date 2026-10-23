@@ -15,3 +15,6 @@ _output/logs/
 .claude/worktrees/
 
 **/*.quarto_ipynb
+
+# written at every render from GA_ID (libs/ga-head.ts)
+libs/ga-head.html
